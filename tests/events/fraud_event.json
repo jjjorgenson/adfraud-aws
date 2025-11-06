@@ -1,0 +1,30 @@
+{
+  "event_id": "test-fraud-001",
+  "timestamp": 1704067200,
+  "event_type": "click",
+  "ip_address": "10.0.0.1",
+  "user_agent": "HeadlessChrome/91.0.4472.124",
+  "device_id": "device-fraud-001",
+  "campaign_id": "campaign-1",
+  "publisher_id": "publisher-1",
+  "referrer": "",
+  "click_id": "click-001",
+  "ip_click_count_24h": 500,
+  "device_click_count_1h": 50,
+  "time_since_last_click": 1.0,
+  "click_to_view_time_ms": 50,
+  "campaign_fraud_rate": 0.8,
+  "publisher_quality": 0.2,
+  "device_fingerprint_entropy": 0.2,
+  "is_mobile": false,
+  "is_repeated_click": true,
+  "ip_country": "US",
+  "device_os": "Windows",
+  "ml_score": 0.65,
+  "features": {
+    "ip_click_count_24h": 500,
+    "device_click_count_1h": 50,
+    "time_since_last_click": 1.0
+  }
+}
+

@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: FraudGuard AI - Ad Fraud Detection System
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.11
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref EventsTable
+        S3_BUCKET_NAME: !Ref DataBucket
+
+Resources:
+  # DynamoDB Table
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-events'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: campaign_id
+          AttributeType: S
+        - AttributeName: device_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: campaign-timestamp-index
+          KeySchema:
+            - AttributeName: campaign_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: device-timestamp-index
+          KeySchema:
+            - AttributeName: device_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FraudGuardAI
+
+  # S3 Bucket
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-data-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldData
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - NoncurrentDays: 30
+                StorageClass: GLACIER_IR
+            NoncurrentVersionExpirationInDays: 90
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ServerSideEncryptionConfiguration:
+        Rules:
+          - ApplyServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FraudGuardAI
+
+  # S3 Bucket Policy
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub '${DataBucket}/*'
+              - !GetAtt DataBucket.Arn
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # Lambda: Ingestion Handler
+  IngestionHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ingestion-handler'
+      CodeUri: src/ingestion/
+      Handler: app.lambda_handler
+      Description: Parse and enrich ad events, store in DynamoDB and S3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EventsTable
+        - S3WritePolicy:
+            BucketName: !Ref DataBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt EventsTable.Arn
+                - !Sub '${EventsTable.Arn}/index/*'
+
+  # Lambda: Fraud Orchestrator
+  FraudOrchestrator:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-orchestrator'
+      CodeUri: src/orchestrator/
+      Handler: app.lambda_handler
+      Description: Route events to ML or ML+AI analysis path
+      Timeout: 300
+      MemorySize: 1024
+             Environment:
+               Variables:
+                 SAGEMAKER_ENDPOINT: !Ref SageMakerEndpoint
+                 AI_ANALYZER_FUNCTION: !GetAtt AIAnalyzer.Arn
+                 DECISION_COMBINER_FUNCTION: !GetAtt DecisionCombiner.Arn
+                 DYNAMODB_TABLE_NAME: !Ref EventsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EventsTable
+        - S3WritePolicy:
+            BucketName: !Ref DataBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sagemaker:InvokeEndpoint
+                - lambda:InvokeFunction
+              Resource: '*'
+
+  # Lambda: AI Analyzer
+  AIAnalyzer:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-ai-analyzer'
+      CodeUri: src/ai_analyzer/
+      Handler: app.lambda_handler
+      Description: Deep fraud analysis using Amazon Bedrock Claude
+      Timeout: 30
+      MemorySize: 1024
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: anthropic.claude-3-5-sonnet-20240620-v1:0
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: '*'
+
+  # Lambda: Decision Combiner
+  DecisionCombiner:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-decision-combiner'
+      CodeUri: src/decision_combiner/
+      Handler: app.lambda_handler
+      Description: Combine ML and AI scores for final fraud decisions
+      Timeout: 10
+      MemorySize: 512
+      Environment:
+        Variables:
+          FRAUD_THRESHOLD: '0.65'
+          REVIEW_THRESHOLD: '0.5'
+          ML_WEIGHT: '0.4'
+          AI_WEIGHT: '0.6'
+          ENSEMBLE_METHOD: 'confidence_weighted'
+
+  # SageMaker Endpoint (placeholder - will be created after model training)
+  SageMakerEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Sub '${AWS::StackName}-xgboost-endpoint'
+      EndpointConfigName: !Ref SageMakerEndpointConfig
+
+  SageMakerEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Sub '${AWS::StackName}-xgboost-config'
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !Ref SageMakerModel
+          InitialInstanceCount: 1
+          InstanceType: ml.t2.medium
+          InitialVariantWeight: 1.0
+
+  SageMakerModel:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: !Sub '${AWS::StackName}-xgboost-model'
+      PrimaryContainer:
+        Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/xgboost:latest'
+        ModelDataUrl: s3://placeholder/model.tar.gz
+      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment environment
+
+Outputs:
+  EventsTableName:
+    Description: DynamoDB Events Table Name
+    Value: !Ref EventsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-EventsTable'
+
+  EventsTableArn:
+    Description: DynamoDB Events Table ARN
+    Value: !GetAtt EventsTable.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EventsTableArn'
+
+  DataBucketName:
+    Description: S3 Data Bucket Name
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataBucket'
+
+  DataBucketArn:
+    Description: S3 Data Bucket ARN
+    Value: !GetAtt DataBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DataBucketArn'
+

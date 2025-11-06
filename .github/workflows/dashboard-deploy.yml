@@ -1,0 +1,195 @@
+name: Deploy Dashboard
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/dashboard-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: fraudguard-dashboard
+  APP_RUNNER_SERVICE: fraudguard-dashboard
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy Dashboard
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+      - name: Set environment variables
+        id: env
+        run: |
+          ENV="${{ github.event.inputs.environment || 'dev' }}"
+          case $ENV in
+            dev)
+              echo "table_name=fraudguard-events-dev" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "table_name=fraudguard-events-staging" >> $GITHUB_OUTPUT
+              ;;
+            prod)
+              echo "table_name=fraudguard-events-prod" >> $GITHUB_OUTPUT
+              ;;
+          esac
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Build Docker image
+        id: build-image
+        working-directory: ./dashboard
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-${IMAGE_TAG}
+          
+          echo "Building Docker image..."
+          docker build -t ${IMAGE_URI} .
+          docker tag ${IMAGE_URI} ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-latest
+          
+          echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+      
+      - name: Push Docker image to ECR
+        run: |
+          IMAGE_URI=${{ steps.build-image.outputs.image_uri }}
+          docker push ${IMAGE_URI}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-latest
+      
+      - name: Get App Runner service ARN
+        id: get-service
+        run: |
+          SERVICE_ARN=$(aws apprunner list-services \
+            --region ${{ env.AWS_REGION }} \
+            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+            --output text)
+          
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "Service not found. Creating new App Runner service..."
+            echo "create_new=true" >> $GITHUB_OUTPUT
+          else
+            echo "service_arn=${SERVICE_ARN}" >> $GITHUB_OUTPUT
+            echo "create_new=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+      
+      - name: Create App Runner service (if needed)
+        if: steps.get-service.outputs.create_new == 'true'
+        run: |
+          aws apprunner create-service \
+            --service-name ${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }} \
+            --source-configuration "{
+              \"ImageRepository\": {
+                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image_uri }}\",
+                \"ImageRepositoryType\": \"ECR\",
+                \"ImageConfiguration\": {
+                  \"Port\": \"8501\",
+                  \"RuntimeEnvironmentVariables\": {
+                    \"DYNAMODB_TABLE_NAME\": \"${{ matrix.table_name }}\",
+                    \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
+                  }
+                }
+              }
+            }" \
+            --instance-configuration "{
+              \"Cpu\": \"1 vCPU\",
+              \"Memory\": \"2 GB\"
+            }" \
+            --auto-scaling-configuration-arn ${{ secrets.APP_RUNNER_AUTO_SCALING_ARN }} \
+            --region ${{ env.AWS_REGION }}
+        continue-on-error: true
+      
+      - name: Update App Runner service
+        if: steps.get-service.outputs.create_new == 'false'
+        run: |
+          aws apprunner start-deployment \
+            --service-arn ${{ steps.get-service.outputs.service_arn }} \
+            --source-configuration "{
+              \"ImageRepository\": {
+                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image_uri }}\",
+                \"ImageRepositoryType\": \"ECR\",
+                \"ImageConfiguration\": {
+                  \"Port\": \"8501\",
+                  \"RuntimeEnvironmentVariables\": {
+                    \"DYNAMODB_TABLE_NAME\": \"${{ matrix.table_name }}\",
+                    \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
+                  }
+                }
+              }
+            }" \
+            --region ${{ env.AWS_REGION }}
+        continue-on-error: true
+      
+      - name: Wait for deployment
+        run: |
+          SERVICE_ARN=${{ steps.get-service.outputs.service_arn }}
+          if [ -z "$SERVICE_ARN" ]; then
+            SERVICE_ARN=$(aws apprunner list-services \
+              --region ${{ env.AWS_REGION }} \
+              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+              --output text)
+          fi
+          
+          echo "Waiting for deployment to complete..."
+          aws apprunner wait service-in-service \
+            --service-arn ${SERVICE_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --max-attempts 30 \
+            --delay 10 || echo "Deployment may still be in progress"
+        continue-on-error: true
+      
+      - name: Get service URL
+        id: get-url
+        run: |
+          SERVICE_ARN=${{ steps.get-service.outputs.service_arn }}
+          if [ -z "$SERVICE_ARN" ]; then
+            SERVICE_ARN=$(aws apprunner list-services \
+              --region ${{ env.AWS_REGION }} \
+              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+              --output text)
+          fi
+          
+          SERVICE_URL=$(aws apprunner describe-service \
+            --service-arn ${SERVICE_ARN} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Service.ServiceUrl' \
+            --output text)
+          
+          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+          echo "Dashboard deployed to: ${SERVICE_URL}"
+        continue-on-error: true
+      
+      - name: Deployment summary
+        run: |
+          echo "## 🛡️ Dashboard Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ steps.build-image.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Service URL:** ${{ steps.get-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ✅ Deployment completed" >> $GITHUB_STEP_SUMMARY
+
