@@ -404,7 +404,9 @@ def render_campaign_analysis(events: List[Dict[str, Any]], metrics: Dict[str, An
         events_df = pd.DataFrame(events)
         if 'campaign_id' in events_df.columns and 'timestamp' in events_df.columns:
             # Convert timestamp to datetime
-            events_df['datetime'] = pd.to_datetime(events_df['timestamp'], unit='s')
+            # Convert timestamp to numeric before datetime conversion
+    events_df['timestamp'] = pd.to_numeric(events_df['timestamp'], errors='coerce').fillna(0)
+    events_df['datetime'] = pd.to_datetime(events_df['timestamp'], unit='s', errors='coerce')
             events_df['hour'] = events_df['datetime'].dt.hour
             
             # Hourly click pattern
