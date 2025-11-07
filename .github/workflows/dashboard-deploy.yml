@@ -33,7 +33,15 @@ jobs:
       - name: Set environment variables
         id: env
         run: |
-          ENV="${{ github.event.inputs.environment || 'dev' }}"
+          # Determine environment: use input if manual dispatch, otherwise default to 'dev'
+          if [ -n "${{ github.event.inputs.environment }}" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          else
+            ENV="dev"
+          fi
+          
+          echo "Setting environment to: ${ENV}"
+          
           case $ENV in
             dev)
               echo "table_name=fraudguard-events-dev" >> $GITHUB_OUTPUT
@@ -44,8 +52,13 @@ jobs:
             prod)
               echo "table_name=fraudguard-events-prod" >> $GITHUB_OUTPUT
               ;;
+            *)
+              echo "table_name=fraudguard-events-dev" >> $GITHUB_OUTPUT
+              ENV="dev"
+              ;;
           esac
           echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "✅ Environment set to: ${ENV}"
       
       - name: Checkout code
         uses: actions/checkout@v4
