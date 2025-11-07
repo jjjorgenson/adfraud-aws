@@ -227,6 +227,10 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     df = pd.DataFrame(events)
     
+    # Parse honeypot field (convert to boolean)
+    if 'honeypot' in df.columns:
+        df['honeypot'] = df['honeypot'].apply(lambda x: True if x is True or x == True or str(x).lower() == 'true' else False)
+    
     # Basic metrics
     total_events = len(df)
     fraud_count = df['is_fraud'].sum() if 'is_fraud' in df.columns else 0
@@ -372,6 +376,34 @@ def render_real_time_overview(events: List[Dict[str, Any]], metrics: Dict[str, A
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No geographic data available")
+    
+    # Honeypot events breakdown
+    if honeypot_events:
+        st.divider()
+        st.subheader("🍯 Honeypot Events Breakdown")
+        honeypot_df = pd.DataFrame(honeypot_events)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if 'button_id' in honeypot_df.columns:
+                button_counts = honeypot_df['button_id'].value_counts()
+                if not button_counts.empty:
+                    st.write("**Clicks by Button:**")
+                    for button, count in button_counts.items():
+                        st.write(f"  • {button}: {count}")
+        
+        with col2:
+            if 'view_time_ms' in honeypot_df.columns:
+                avg_view_time = honeypot_df['view_time_ms'].mean()
+                st.metric("Average View Time", f"{avg_view_time:.0f} ms")
+        
+        # Show honeypot event types
+        if 'event_type' in honeypot_df.columns:
+            event_type_counts = honeypot_df['event_type'].value_counts()
+            if not event_type_counts.empty:
+                st.write("**Event Types:**")
+                for event_type, count in event_type_counts.items():
+                    st.write(f"  • {event_type}: {count}")
 
 
 def render_campaign_analysis(events: List[Dict[str, Any]], metrics: Dict[str, Any]):
