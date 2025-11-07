@@ -446,7 +446,7 @@ def render_event_detail(events: List[Dict[str, Any]]):
         st.subheader("Event Information")
         st.json({
             'Event ID': selected_event.get('event_id'),
-            'Timestamp': datetime.fromtimestamp(selected_event.get('timestamp', 0), tz=timezone.utc).isoformat(),
+            'Timestamp': datetime.fromtimestamp(float(selected_event.get('timestamp', 0)), tz=timezone.utc).isoformat(),
             'Campaign ID': selected_event.get('campaign_id'),
             'Publisher ID': selected_event.get('publisher_id'),
             'IP Address': selected_event.get('ip_address'),
