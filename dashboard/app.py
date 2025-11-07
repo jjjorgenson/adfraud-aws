@@ -136,28 +136,8 @@ def get_mock_events(hours: int = 24) -> List[Dict[str, Any]]:
     for i in range(100):
         is_fraud = random.random() < 0.3  # 30% fraud rate
         campaign_id = f'campaign-{random.randint(1, 10)}'
+        ip_address = fake.ipv4() if fake else f'192.168.{random.randint(1, 255)}.{random.randint(1, 255)}'
         primary_fraud_type = random.choice(fraud_types) if is_fraud else 'legitimate'
-        
-        # Generate realistic IP addresses based on fraud type
-        if is_fraud:
-            if primary_fraud_type == 'bot_traffic':
-                # Datacenter IPs for bot traffic
-                ip_address = f'10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}'
-            elif primary_fraud_type == 'click_farm':
-                # Click farm IPs (private range)
-                ip_address = f'172.16.{random.randint(0, 31)}.{random.randint(1, 254)}'
-            elif primary_fraud_type == 'competitor_clicking':
-                # Business IPs for competitor clicking
-                ip_address = f'203.0.113.{random.randint(1, 254)}'
-            elif primary_fraud_type == 'proxy_fraud':
-                # Proxy IPs
-                ip_address = f'198.51.100.{random.randint(1, 254)}'
-            else:
-                # Other fraud types - use random IP
-                ip_address = fake.ipv4() if fake else f'192.168.{random.randint(1, 255)}.{random.randint(1, 255)}'
-        else:
-            # Legitimate traffic - use realistic public IPs
-            ip_address = fake.ipv4() if fake else f'{random.randint(1, 223)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 254)}'
         
         # Generate fraud-specific data
         click_to_install_time = None
@@ -247,21 +227,15 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     df = pd.DataFrame(events)
     
-    # Convert is_fraud to numeric (0/1) for proper aggregation
-    if 'is_fraud' in df.columns:
-        # Convert boolean/object to numeric: True -> 1, False -> 0, None -> 0
-        df['is_fraud'] = df['is_fraud'].apply(lambda x: 1 if x is True or x == True or str(x).lower() == 'true' else 0)
-        df['is_fraud'] = pd.to_numeric(df['is_fraud'], errors='coerce').fillna(0)
-    
     # Basic metrics
     total_events = len(df)
-    fraud_count = int(df['is_fraud'].sum()) if 'is_fraud' in df.columns else 0
+    fraud_count = df['is_fraud'].sum() if 'is_fraud' in df.columns else 0
     fraud_rate = (fraud_count / total_events * 100) if total_events > 0 else 0.0
     
     # Fraud by type
     fraud_by_type = {}
     if 'primary_fraud_type' in df.columns:
-        fraud_df = df[df['is_fraud'] == 1] if 'is_fraud' in df.columns else df
+        fraud_df = df[df['is_fraud'] == True] if 'is_fraud' in df.columns else df
         fraud_by_type = fraud_df['primary_fraud_type'].value_counts().to_dict()
     
     # Top fraud signals
@@ -281,9 +255,6 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             'is_fraud': ['sum', 'count']
         }).reset_index()
         campaign_fraud.columns = ['campaign_id', 'fraud_count', 'total_count']
-        # Ensure columns are numeric
-        campaign_fraud['fraud_count'] = pd.to_numeric(campaign_fraud['fraud_count'], errors='coerce').fillna(0)
-        campaign_fraud['total_count'] = pd.to_numeric(campaign_fraud['total_count'], errors='coerce').fillna(1)
         campaign_fraud['fraud_rate'] = (campaign_fraud['fraud_count'] / campaign_fraud['total_count'] * 100).round(2)
         fraud_by_campaign = campaign_fraud.set_index('campaign_id')['fraud_rate'].to_dict()
     
@@ -294,9 +265,6 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             'is_fraud': ['sum', 'count']
         }).reset_index()
         country_fraud.columns = ['country', 'fraud_count', 'total_count']
-        # Ensure columns are numeric
-        country_fraud['fraud_count'] = pd.to_numeric(country_fraud['fraud_count'], errors='coerce').fillna(0)
-        country_fraud['total_count'] = pd.to_numeric(country_fraud['total_count'], errors='coerce').fillna(1)
         country_fraud['fraud_rate'] = (country_fraud['fraud_count'] / country_fraud['total_count'] * 100).round(2)
         fraud_by_country = country_fraud.set_index('country')['fraud_rate'].to_dict()
     
@@ -315,6 +283,24 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
 def render_real_time_overview(events: List[Dict[str, Any]], metrics: Dict[str, Any]):
     """Render real-time overview dashboard"""
     st.header("📊 Real-Time Overview")
+    
+    # Filter honeypot events
+    honeypot_events = [e for e in events if e.get('honeypot') == True]
+    regular_events = [e for e in events if not e.get('honeypot')]
+    
+    # Show honeypot stats if available
+    if honeypot_events:
+        honeypot_metrics = calculate_metrics(honeypot_events)
+        with st.expander("🍯 Honeypot Events", expanded=False):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Honeypot Events", len(honeypot_events))
+            with col2:
+                st.metric("Honeypot Fraud", honeypot_metrics['fraud_count'], delta=f"{honeypot_metrics['fraud_rate']:.1f}%")
+            with col3:
+                st.metric("Honeypot Legitimate", honeypot_metrics['legitimate_count'])
+            with col4:
+                st.metric("Honeypot Fraud Rate", f"{honeypot_metrics['fraud_rate']:.2f}%")
     
     # Key metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -423,9 +409,8 @@ def render_campaign_analysis(events: List[Dict[str, Any]], metrics: Dict[str, An
     if events:
         events_df = pd.DataFrame(events)
         if 'campaign_id' in events_df.columns and 'timestamp' in events_df.columns:
-            # Convert timestamp to numeric before datetime conversion
-            events_df['timestamp'] = pd.to_numeric(events_df['timestamp'], errors='coerce').fillna(0)
-            events_df['datetime'] = pd.to_datetime(events_df['timestamp'], unit='s', errors='coerce')
+            # Convert timestamp to datetime
+            events_df['datetime'] = pd.to_datetime(events_df['timestamp'], unit='s')
             events_df['hour'] = events_df['datetime'].dt.hour
             
             # Hourly click pattern
@@ -448,6 +433,26 @@ def render_event_detail(events: List[Dict[str, Any]]):
         st.info("No events available")
         return
     
+    # Filter options
+    col1, col2 = st.columns(2)
+    with col1:
+        show_honeypot = st.checkbox("Show Honeypot Events", value=True)
+    with col2:
+        show_regular = st.checkbox("Show Regular Events", value=True)
+    
+    # Filter events based on checkboxes
+    filtered_events = []
+    if show_honeypot:
+        filtered_events.extend([e for e in events if e.get('honeypot') == True])
+    if show_regular:
+        filtered_events.extend([e for e in events if not e.get('honeypot')])
+    
+    if not filtered_events:
+        st.info("No events match the selected filters")
+        return
+    
+    events = filtered_events
+    
     # Event selector
     event_ids = [e.get('event_id', 'unknown') for e in events]
     selected_event_id = st.selectbox("Select Event", event_ids)
@@ -466,7 +471,7 @@ def render_event_detail(events: List[Dict[str, Any]]):
         st.subheader("Event Information")
         st.json({
             'Event ID': selected_event.get('event_id'),
-            'Timestamp': datetime.fromtimestamp(float(selected_event.get('timestamp', 0)), tz=timezone.utc).isoformat(),
+            'Timestamp': datetime.fromtimestamp(selected_event.get('timestamp', 0), tz=timezone.utc).isoformat(),
             'Campaign ID': selected_event.get('campaign_id'),
             'Publisher ID': selected_event.get('publisher_id'),
             'IP Address': selected_event.get('ip_address'),
