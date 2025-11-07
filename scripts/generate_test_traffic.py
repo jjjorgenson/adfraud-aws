@@ -141,36 +141,70 @@ def convert_decimal_to_float(obj: Any) -> Any:
         return obj
 
 
+def convert_floats_to_decimal(obj: Any) -> Any:
+    """Recursively convert floats to Decimal for DynamoDB compatibility"""
+    from decimal import Decimal
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_floats_to_decimal(item) for item in obj]
+    else:
+        return obj
+
+
 def send_event(event: Dict[str, Any]) -> bool:
-    """Send event to ingestion handler Lambda"""
+    """Send event directly to DynamoDB (bypassing Lambda for now)"""
     try:
-        # Convert Decimal to float for JSON serialization
-        event_json = convert_decimal_to_float(event)
+        # Convert all floats to Decimal
+        event = convert_floats_to_decimal(event)
         
-        # Create API Gateway-like event structure
-        lambda_event = {
-            'body': json.dumps(event_json),
-            'headers': {
-                'Content-Type': 'application/json'
-            }
+        # Add required fields for DynamoDB
+        now = datetime.now(timezone.utc)
+        timestamp = int(now.timestamp())
+        
+        enriched_event = {
+            'event_id': event.get('event_id'),
+            'timestamp': timestamp,
+            'event_type': event.get('event_type', 'click'),
+            'ip_address': event.get('ip_address'),
+            'user_agent': event.get('user_agent', ''),
+            'device_id': event.get('device_id'),
+            'campaign_id': event.get('campaign_id'),
+            'publisher_id': event.get('publisher_id', ''),
+            'referrer': event.get('referrer', ''),
+            'click_id': event.get('click_id', ''),
+            'raw_data': event,  # Store original event
+            'ttl': timestamp + (7 * 24 * 60 * 60),  # 7 days TTL
+            'created_at': now.isoformat(),
+            'ip_click_count_24h': 0,
+            'device_click_count_1h': 0,
+            'time_since_last_click': None,
         }
         
-        response = lambda_client.invoke(
-            FunctionName=INGESTION_FUNCTION,
-            InvocationType='RequestResponse',
-            Payload=json.dumps(lambda_event)
-        )
+        # Convert enriched event floats to Decimal
+        enriched_event = convert_floats_to_decimal(enriched_event)
         
-        result = json.loads(response['Payload'].read())
+        # Store directly in DynamoDB
+        table = dynamodb.Table(TABLE_NAME)
+        table.put_item(Item=enriched_event)
         
-        if result.get('statusCode') == 200:
-            return True
-        else:
-            print(f"❌ Error: {result.get('body', 'Unknown error')}")
-            return False
+        # Also trigger orchestrator asynchronously
+        try:
+            lambda_client.invoke(
+                FunctionName='fraudguard-ai-orchestrator',
+                InvocationType='Event',  # Async
+                Payload=json.dumps(enriched_event)
+            )
+        except Exception as e:
+            # Don't fail if orchestrator invocation fails
+            pass
+        
+        return True
             
     except Exception as e:
-        print(f"❌ Exception sending event: {str(e)}")
+        print(f"❌ Exception storing event: {str(e)}")
         return False
 
 
