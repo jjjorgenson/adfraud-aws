@@ -32,6 +32,8 @@ def get_s3_client():
     return boto3.client('s3', region_name='us-east-1')
 
 # Configuration
+# Default table name matches SAM template output
+# Can be overridden via environment variable DYNAMODB_TABLE_NAME
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'fraudguard-events-dev')
 S3_BUCKET = os.environ.get('S3_BUCKET_NAME', '')
 
@@ -56,6 +58,15 @@ def get_recent_events(hours: int = 24) -> List[Dict[str, Any]]:
         return get_mock_events(hours)
     
     try:
+        # Verify table exists by checking its status
+        table.load()
+    except Exception as e:
+        # Table doesn't exist or can't be accessed
+        st.warning(f"⚠️ DynamoDB table '{TABLE_NAME}' not found. Using mock data for demonstration.")
+        st.info(f"💡 To use real data, ensure the table exists in AWS. Error: {str(e)}")
+        return get_mock_events(hours)
+    
+    try:
         # Calculate timestamp threshold
         threshold = int((datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp())
         
@@ -67,9 +78,26 @@ def get_recent_events(hours: int = 24) -> List[Dict[str, Any]]:
             ExpressionAttributeValues={':threshold': threshold}
         )
         
-        return response.get('Items', [])
+        items = response.get('Items', [])
+        
+        # Handle pagination if needed
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(
+                FilterExpression='#ts >= :threshold',
+                ExpressionAttributeNames={'#ts': 'timestamp'},
+                ExpressionAttributeValues={':threshold': threshold},
+                ExclusiveStartKey=response['LastEvaluatedKey']
+            )
+            items.extend(response.get('Items', []))
+        
+        if not items:
+            st.info(f"ℹ️ No events found in the last {hours} hours. Using mock data for demonstration.")
+            return get_mock_events(hours)
+        
+        return items
     except Exception as e:
         st.error(f"Error fetching events: {str(e)}")
+        st.info("Using mock data for demonstration.")
         return get_mock_events(hours)
 
 
