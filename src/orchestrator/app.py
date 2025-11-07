@@ -425,6 +425,9 @@ def store_result(event_id: str, result: Dict[str, Any]) -> None:
             else:
                 return obj
         
+        # Convert entire result to Decimal first
+        result = convert_floats_to_decimal(result)
+        
         table = dynamodb.Table(TABLE_NAME)
         update_expression = "SET fraud_result = :result, updated_at = :timestamp"
         expression_values = {":result": result, ":timestamp": datetime.now(timezone.utc).isoformat()}
@@ -436,7 +439,15 @@ def store_result(event_id: str, result: Dict[str, Any]) -> None:
         
         if "fraud_score" in result:
             update_expression += ", fraud_score = :fraud_score"
-            expression_values[":fraud_score"] = convert_floats_to_decimal({"value": result["fraud_score"]})["value"]
+            expression_values[":fraud_score"] = result["fraud_score"]  # Already converted to Decimal
+        
+        if "ml_score" in result:
+            update_expression += ", ml_score = :ml_score"
+            expression_values[":ml_score"] = result["ml_score"]  # Already converted to Decimal
+        
+        if "ai_score" in result:
+            update_expression += ", ai_score = :ai_score"
+            expression_values[":ai_score"] = result["ai_score"]  # Already converted to Decimal
         
         if "primary_fraud_type" in result:
             update_expression += ", primary_fraud_type = :primary_fraud_type"
@@ -446,8 +457,9 @@ def store_result(event_id: str, result: Dict[str, Any]) -> None:
             update_expression += ", fraud_signals = :fraud_signals"
             expression_values[":fraud_signals"] = result["fraud_signals"]
         
-        # Convert floats to Decimal for DynamoDB
-        expression_values = convert_floats_to_decimal(expression_values)
+        if "reasoning" in result:
+            update_expression += ", reasoning = :reasoning"
+            expression_values[":reasoning"] = result["reasoning"]
         
         table.update_item(
             Key={"event_id": event_id},
