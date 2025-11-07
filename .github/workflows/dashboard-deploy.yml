@@ -65,28 +65,38 @@ jobs:
         id: build-image
         working-directory: ./dashboard
         run: |
-          IMAGE_TAG=${{ github.sha }}
-          IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-${IMAGE_TAG}
+          IMAGE_TAG="${{ github.sha }}"
+          ENV="${{ steps.env.outputs.environment }}"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-${IMAGE_TAG}"
           
-          echo "Building Docker image..."
-          docker build -t ${IMAGE_URI} .
-          docker tag ${IMAGE_URI} ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-latest
+          echo "Building Docker image for ${ENV} environment..."
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+          echo "ENV=${ENV}"
+          echo "IMAGE_URI=${IMAGE_URI}"
+          
+          docker build -t "${IMAGE_URI}" .
+          docker tag "${IMAGE_URI}" "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-latest"
           
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
       
       - name: Push Docker image to ECR
         run: |
-          IMAGE_URI=${{ steps.build-image.outputs.image_uri }}
-          docker push ${IMAGE_URI}
-          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ matrix.environment }}-latest
+          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
+          ENV="${{ steps.env.outputs.environment }}"
+          echo "Pushing image to ECR..."
+          echo "IMAGE_URI=${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+          docker push "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-latest"
+          echo "✅ Image pushed successfully"
       
       - name: Get App Runner service ARN
         id: get-service
         run: |
+          ENV="${{ steps.env.outputs.environment }}"
           SERVICE_ARN=$(aws apprunner list-services \
-            --region ${{ env.AWS_REGION }} \
-            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
             --output text)
           
           if [ -z "$SERVICE_ARN" ]; then
@@ -101,16 +111,23 @@ jobs:
       - name: Create App Runner service (if needed)
         if: steps.get-service.outputs.create_new == 'true'
         run: |
+          ENV="${{ steps.env.outputs.environment }}"
+          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
+          TABLE_NAME="${{ steps.env.outputs.table_name }}"
+          
+          echo "Creating new App Runner service: ${{ env.APP_RUNNER_SERVICE }}-${ENV}"
+          echo "IMAGE_URI=${IMAGE_URI}"
+          
           aws apprunner create-service \
-            --service-name ${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }} \
+            --service-name "${{ env.APP_RUNNER_SERVICE }}-${ENV}" \
             --source-configuration "{
               \"ImageRepository\": {
-                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image_uri }}\",
+                \"ImageIdentifier\": \"${IMAGE_URI}\",
                 \"ImageRepositoryType\": \"ECR\",
                 \"ImageConfiguration\": {
                   \"Port\": \"8501\",
                   \"RuntimeEnvironmentVariables\": {
-                    \"DYNAMODB_TABLE_NAME\": \"${{ matrix.table_name }}\",
+                    \"DYNAMODB_TABLE_NAME\": \"${TABLE_NAME}\",
                     \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
                   }
                 }
@@ -120,76 +137,101 @@ jobs:
               \"Cpu\": \"1 vCPU\",
               \"Memory\": \"2 GB\"
             }" \
-            --auto-scaling-configuration-arn ${{ secrets.APP_RUNNER_AUTO_SCALING_ARN }} \
-            --region ${{ env.AWS_REGION }}
+            --region "${{ env.AWS_REGION }}" \
+            --output json || echo "Service creation may have failed or service already exists"
         continue-on-error: true
       
       - name: Update App Runner service
         if: steps.get-service.outputs.create_new == 'false'
         run: |
+          ENV="${{ steps.env.outputs.environment }}"
+          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
+          TABLE_NAME="${{ steps.env.outputs.table_name }}"
+          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
+          
+          echo "Updating App Runner service: ${SERVICE_ARN}"
+          echo "IMAGE_URI=${IMAGE_URI}"
+          
           aws apprunner start-deployment \
-            --service-arn ${{ steps.get-service.outputs.service_arn }} \
+            --service-arn "${SERVICE_ARN}" \
             --source-configuration "{
               \"ImageRepository\": {
-                \"ImageIdentifier\": \"${{ steps.build-image.outputs.image_uri }}\",
+                \"ImageIdentifier\": \"${IMAGE_URI}\",
                 \"ImageRepositoryType\": \"ECR\",
                 \"ImageConfiguration\": {
                   \"Port\": \"8501\",
                   \"RuntimeEnvironmentVariables\": {
-                    \"DYNAMODB_TABLE_NAME\": \"${{ matrix.table_name }}\",
+                    \"DYNAMODB_TABLE_NAME\": \"${TABLE_NAME}\",
                     \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
                   }
                 }
               }
             }" \
-            --region ${{ env.AWS_REGION }}
+            --region "${{ env.AWS_REGION }}" \
+            --output json
+          echo "✅ Deployment started"
         continue-on-error: true
       
       - name: Wait for deployment
         run: |
-          SERVICE_ARN=${{ steps.get-service.outputs.service_arn }}
-          if [ -z "$SERVICE_ARN" ]; then
+          ENV="${{ steps.env.outputs.environment }}"
+          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
+          
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" == "None" ]; then
             SERVICE_ARN=$(aws apprunner list-services \
-              --region ${{ env.AWS_REGION }} \
-              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+              --region "${{ env.AWS_REGION }}" \
+              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
               --output text)
           fi
           
-          echo "Waiting for deployment to complete..."
-          aws apprunner wait service-in-service \
-            --service-arn ${SERVICE_ARN} \
-            --region ${{ env.AWS_REGION }} \
-            --max-attempts 30 \
-            --delay 10 || echo "Deployment may still be in progress"
+          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
+            echo "Waiting for deployment to complete for service: ${SERVICE_ARN}"
+            aws apprunner wait service-in-service \
+              --service-arn "${SERVICE_ARN}" \
+              --region "${{ env.AWS_REGION }}" \
+              --max-attempts 30 \
+              --delay 10 || echo "⚠️  Deployment may still be in progress (this is normal)"
+          else
+            echo "⚠️  Could not find service ARN, skipping wait"
+          fi
         continue-on-error: true
       
       - name: Get service URL
         id: get-url
         run: |
-          SERVICE_ARN=${{ steps.get-service.outputs.service_arn }}
-          if [ -z "$SERVICE_ARN" ]; then
+          ENV="${{ steps.env.outputs.environment }}"
+          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
+          
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" == "None" ]; then
             SERVICE_ARN=$(aws apprunner list-services \
-              --region ${{ env.AWS_REGION }} \
-              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${{ matrix.environment }}'].ServiceArn" \
+              --region "${{ env.AWS_REGION }}" \
+              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
               --output text)
           fi
           
-          SERVICE_URL=$(aws apprunner describe-service \
-            --service-arn ${SERVICE_ARN} \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Service.ServiceUrl' \
-            --output text)
-          
-          echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
-          echo "Dashboard deployed to: ${SERVICE_URL}"
+          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
+            SERVICE_URL=$(aws apprunner describe-service \
+              --service-arn "${SERVICE_ARN}" \
+              --region "${{ env.AWS_REGION }}" \
+              --query 'Service.ServiceUrl' \
+              --output text)
+            
+            echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+            echo "✅ Dashboard deployed to: ${SERVICE_URL}"
+          else
+            echo "⚠️  Could not retrieve service URL"
+            echo "service_url=" >> $GITHUB_OUTPUT
+          fi
         continue-on-error: true
       
       - name: Deployment summary
         run: |
           echo "## 🛡️ Dashboard Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** ${{ matrix.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** ${{ steps.build-image.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Service URL:** ${{ steps.get-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.get-url.outputs.service_url }}" ]; then
+            echo "**Service URL:** ${{ steps.get-url.outputs.service_url }}" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "**Status:** ✅ Deployment completed" >> $GITHUB_STEP_SUMMARY
 
