@@ -6,6 +6,7 @@ Parses and enriches ad events, stores in DynamoDB and S3
 import json
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -142,6 +143,18 @@ def enrich_event(body: Dict[str, Any], event_id: str) -> Dict[str, Any]:
     return enriched
 
 
+def convert_floats_to_decimal(obj: Any) -> Any:
+    """Recursively convert floats to Decimal for DynamoDB compatibility"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_floats_to_decimal(item) for item in obj]
+    else:
+        return obj
+
+
 def store_in_dynamodb(event: Dict[str, Any]) -> None:
     """
     Store enriched event in DynamoDB
@@ -151,6 +164,9 @@ def store_in_dynamodb(event: Dict[str, Any]) -> None:
     """
     if not TABLE_NAME:
         raise ValueError("DYNAMODB_TABLE_NAME environment variable not set")
+
+    # Convert floats to Decimal for DynamoDB compatibility
+    event = convert_floats_to_decimal(event)
 
     table = dynamodb.Table(TABLE_NAME)
     table.put_item(Item=event)
