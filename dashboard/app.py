@@ -60,8 +60,10 @@ def get_recent_events(hours: int = 24) -> List[Dict[str, Any]]:
         threshold = int((datetime.now(timezone.utc) - timedelta(hours=hours)).timestamp())
         
         # Scan table for recent events
+        # Note: 'timestamp' is a reserved keyword in DynamoDB, so we use ExpressionAttributeNames
         response = table.scan(
-            FilterExpression='timestamp >= :threshold',
+            FilterExpression='#ts >= :threshold',
+            ExpressionAttributeNames={'#ts': 'timestamp'},
             ExpressionAttributeValues={':threshold': threshold}
         )
         
