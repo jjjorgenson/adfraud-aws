@@ -109,13 +109,31 @@ jobs:
           echo "IMAGE_URI=${IMAGE_URI}"
           docker push "${IMAGE_URI}"
           docker push "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-latest"
+          # Also push as 'latest' for ECS task definition compatibility
+          docker tag "${IMAGE_URI}" "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
+          docker push "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
           echo "✅ Image pushed successfully"
       
       - name: Get ECS cluster and service info
         id: get-ecs-info
         run: |
           ENV="${{ steps.env.outputs.environment }}"
-          STACK_NAME="${{ env.STACK_NAME }}-${ENV}"
+          # Try stack name with environment suffix first, fallback to base name for dev
+          STACK_NAME_WITH_ENV="${{ env.STACK_NAME }}-${ENV}"
+          STACK_NAME_BASE="${{ env.STACK_NAME }}"
+          
+          # Check which stack exists
+          if aws cloudformation describe-stacks --stack-name "${STACK_NAME_WITH_ENV}" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            STACK_NAME="${STACK_NAME_WITH_ENV}"
+          elif aws cloudformation describe-stacks --stack-name "${STACK_NAME_BASE}" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            STACK_NAME="${STACK_NAME_BASE}"
+          else
+            echo "⚠️  Neither stack ${STACK_NAME_WITH_ENV} nor ${STACK_NAME_BASE} exists"
+            STACK_NAME="${STACK_NAME_WITH_ENV}"
+          fi
+          
+          echo "Using stack name: ${STACK_NAME}"
+          echo "stack_name=${STACK_NAME}" >> $GITHUB_OUTPUT
           
           # Get cluster name from stack
           CLUSTER_NAME=$(aws cloudformation describe-stacks \
@@ -247,7 +265,7 @@ jobs:
         id: get-url
         run: |
           ENV="${{ steps.env.outputs.environment }}"
-          STACK_NAME="${{ env.STACK_NAME }}-${ENV}"
+          STACK_NAME="${{ steps.get-ecs-info.outputs.stack_name }}"
           
           ALB_DNS=$(aws cloudformation describe-stacks \
             --stack-name "${STACK_NAME}" \
