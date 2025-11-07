@@ -2,9 +2,10 @@
 S3 utility functions for event storage and retrieval
 """
 import json
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
 import boto3
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
 
 s3_client = boto3.client('s3')
 

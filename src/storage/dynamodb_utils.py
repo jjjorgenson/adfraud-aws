@@ -1,10 +1,11 @@
 """
 DynamoDB utility functions for event storage and retrieval
 """
-import boto3
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
+import boto3
 
 dynamodb = boto3.resource('dynamodb')
 
@@ -259,6 +260,128 @@ def update_event_result(
         )
     except Exception as e:
         print(f"Error updating event result: {str(e)}")
+
+
+def get_recent_install_events(
+    table_name: str,
+    device_id: str,
+    start_timestamp: Optional[int] = None,
+    end_timestamp: Optional[int] = None,
+    attribution_window_sec: int = 3600
+) -> List[Dict[str, Any]]:
+    """
+    Query install events by device within attribution window
+    
+    Args:
+        table_name: Name of the DynamoDB table
+        device_id: Device ID to query
+        start_timestamp: Start timestamp (Unix epoch), defaults to now - attribution_window
+        end_timestamp: End timestamp (Unix epoch), defaults to now
+        attribution_window_sec: Attribution window in seconds (default: 1 hour)
+        
+    Returns:
+        List of install event dictionaries
+    """
+    table = get_table(table_name)
+    
+    # Default to attribution window if not specified
+    if end_timestamp is None:
+        end_timestamp = int(datetime.now(timezone.utc).timestamp())
+    if start_timestamp is None:
+        start_timestamp = end_timestamp - attribution_window_sec
+    
+    try:
+        # Query device events
+        device_events = query_events_by_device(table_name, device_id, start_timestamp, end_timestamp)
+        
+        # Filter for install events only
+        install_events = [
+            event for event in device_events
+            if event.get('event_type') == 'install'
+        ]
+        
+        # Sort by timestamp descending (most recent first)
+        install_events.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+        
+        return install_events
+    except Exception as e:
+        print(f"Error querying install events: {str(e)}")
+        return []
+
+
+def correlate_click_with_install(
+    table_name: str,
+    click_event: Dict[str, Any],
+    attribution_window_sec: int = 3600
+) -> Optional[Dict[str, Any]]:
+    """
+    Find matching install event for a click event within attribution window
+    
+    Args:
+        table_name: Name of the DynamoDB table
+        click_event: Click event dictionary
+        attribution_window_sec: Attribution window in seconds (default: 1 hour)
+        
+    Returns:
+        Matching install event or None if not found
+    """
+    device_id = click_event.get('device_id')
+    click_timestamp = click_event.get('timestamp')
+    
+    if not device_id or not click_timestamp:
+        return None
+    
+    # Look for installs within attribution window after the click
+    end_timestamp = click_timestamp + attribution_window_sec
+    
+    install_events = get_recent_install_events(
+        table_name,
+        device_id,
+        start_timestamp=click_timestamp,
+        end_timestamp=end_timestamp,
+        attribution_window_sec=attribution_window_sec
+    )
+    
+    if not install_events:
+        return None
+    
+    # Return the first install (most recent, since sorted descending)
+    # But we want the install that occurred after the click
+    for install in install_events:
+        install_timestamp = install.get('timestamp', 0)
+        if install_timestamp >= click_timestamp:
+            return install
+    
+    return None
+
+
+def calculate_attribution_window(
+    click_timestamp: int,
+    install_timestamp: int,
+    max_window_sec: int = 3600
+) -> Optional[int]:
+    """
+    Calculate if click falls within valid attribution window
+    
+    Args:
+        click_timestamp: Click event timestamp
+        install_timestamp: Install event timestamp
+        max_window_sec: Maximum attribution window in seconds (default: 1 hour)
+        
+    Returns:
+        Time difference in seconds if within window, None otherwise
+    """
+    if install_timestamp < click_timestamp:
+        # Install happened before click - invalid
+        return None
+    
+    time_diff = install_timestamp - click_timestamp
+    
+    if time_diff > max_window_sec:
+        # Outside attribution window
+        return None
+    
+    return time_diff
 
 
 def convert_floats_to_decimal(obj: Any) -> Any:

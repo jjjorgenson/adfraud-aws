@@ -2,21 +2,21 @@
 Fraud Orchestrator Lambda Function
 Routes events to ML or ML+AI analysis path based on ML score
 """
-import json
-import os
-import boto3
 import csv
 import io
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+import boto3
 
 # Import feature extraction
 try:
     from feature_extractor import extract_features
 except ImportError:
     # Fallback for Lambda deployment
-    import sys
-    import os
     sys.path.append(os.path.dirname(__file__))
     from feature_extractor import extract_features
 
@@ -127,7 +127,10 @@ def get_context_data(event_id: str, device_id: str, ip_address: str) -> Dict[str
             from storage.dynamodb_utils import (
                 get_device_click_count_1h,
                 get_time_since_last_click,
-                query_events_by_device
+                query_events_by_device,
+                get_recent_install_events,
+                correlate_click_with_install,
+                calculate_attribution_window
             )
         except ImportError:
             # Fallback - define simple query function
@@ -150,6 +153,15 @@ def get_context_data(event_id: str, device_id: str, ip_address: str) -> Dict[str
             def get_time_since_last_click(table_name, device_id):
                 # Simplified implementation
                 return None
+            
+            def get_recent_install_events(table_name, device_id, start_ts=None, end_ts=None, attribution_window_sec=3600):
+                return []
+            
+            def correlate_click_with_install(table_name, click_event, attribution_window_sec=3600):
+                return None
+            
+            def calculate_attribution_window(click_timestamp, install_timestamp, max_window_sec=3600):
+                return None
         
         # Get device history
         now = datetime.now(timezone.utc)
@@ -166,10 +178,22 @@ def get_context_data(event_id: str, device_id: str, ip_address: str) -> Dict[str
         # For now, use placeholder
         ip_click_count_24h = 0
         
+        # Get install event correlation for click injection detection
+        click_injection_data = get_click_injection_data(event_id, device_id, ip_address)
+        
+        # Get conversion data for incentivized click detection
+        conversion_data = get_conversion_data(device_id, ip_address)
+        
+        # Get competitor IPs for competitor clicking detection
+        competitor_data = get_competitor_data(ip_address)
+        
         return {
             'ip_click_count_24h': ip_click_count_24h,
             'device_click_count_1h': device_click_count_1h,
-            'time_since_last_click': time_since_last_click
+            'time_since_last_click': time_since_last_click,
+            **click_injection_data,
+            **conversion_data,
+            **competitor_data
         }
     except Exception as e:
         print(f"Error getting context data: {str(e)}")
@@ -427,6 +451,248 @@ def store_result(event_id: str, result: Dict[str, Any]) -> None:
         )
     except Exception as e:
         print(f"Error storing result: {str(e)}")
+
+
+def get_click_injection_data(event_id: str, device_id: str, ip_address: str) -> Dict[str, Any]:
+    """
+    Get click injection detection data by correlating clicks with installs
+    
+    Args:
+        event_id: Event ID
+        device_id: Device ID
+        ip_address: IP address
+        
+    Returns:
+        Dictionary with click injection detection features
+    """
+    if not TABLE_NAME or not device_id:
+        return {
+            'click_to_install_time_sec': 0.0,
+            'has_recent_install': False,
+            'install_broadcast_detected': False,
+            'click_injection_risk_score': 0.0
+        }
+    
+    try:
+        # Import storage utilities
+        try:
+            from storage.dynamodb_utils import (
+                get_event,
+                get_recent_install_events,
+                correlate_click_with_install,
+                calculate_attribution_window
+            )
+        except ImportError:
+            return {
+                'click_to_install_time_sec': 0.0,
+                'has_recent_install': False,
+                'install_broadcast_detected': False,
+                'click_injection_risk_score': 0.0
+            }
+        
+        # Get current event
+        current_event = get_event(TABLE_NAME, event_id)
+        if not current_event:
+            return {
+                'click_to_install_time_sec': 0.0,
+                'has_recent_install': False,
+                'install_broadcast_detected': False,
+                'click_injection_risk_score': 0.0
+            }
+        
+        event_type = current_event.get('event_type')
+        event_timestamp = current_event.get('timestamp')
+        
+        # Only process click events for click injection detection
+        if event_type != 'click':
+            return {
+                'click_to_install_time_sec': 0.0,
+                'has_recent_install': False,
+                'install_broadcast_detected': False,
+                'click_injection_risk_score': 0.0
+            }
+        
+        # Correlate click with install
+        install_event = correlate_click_with_install(TABLE_NAME, current_event, attribution_window_sec=3600)
+        
+        if not install_event:
+            return {
+                'click_to_install_time_sec': 0.0,
+                'has_recent_install': False,
+                'install_broadcast_detected': False,
+                'click_injection_risk_score': 0.0
+            }
+        
+        install_timestamp = install_event.get('timestamp', 0)
+        click_to_install_time = calculate_attribution_window(event_timestamp, install_timestamp, max_window_sec=3600)
+        
+        if click_to_install_time is None:
+            return {
+                'click_to_install_time_sec': 0.0,
+                'has_recent_install': False,
+                'install_broadcast_detected': False,
+                'click_injection_risk_score': 0.0
+            }
+        
+        # Calculate click injection risk score
+        # <1 second is highly suspicious (likely click injection)
+        # 1-10 seconds is suspicious
+        # 30-300 seconds is normal
+        has_recent_install = click_to_install_time > 0
+        install_broadcast_detected = click_to_install_time < 1.0  # <1 second suggests install broadcast monitoring
+        
+        # Risk score: inverse of time (shorter time = higher risk)
+        # Normalize to 0-1 range
+        if click_to_install_time < 1.0:
+            risk_score = 0.95  # Highly suspicious
+        elif click_to_install_time < 10.0:
+            risk_score = 0.7  # Suspicious
+        elif click_to_install_time < 30.0:
+            risk_score = 0.4  # Somewhat suspicious
+        else:
+            risk_score = max(0.0, 1.0 - (click_to_install_time / 300.0))  # Normal range
+        
+        return {
+            'click_to_install_time_sec': float(click_to_install_time),
+            'has_recent_install': has_recent_install,
+            'install_broadcast_detected': install_broadcast_detected,
+            'click_injection_risk_score': risk_score
+        }
+        
+    except Exception as e:
+        print(f"Error getting click injection data: {str(e)}")
+        return {
+            'click_to_install_time_sec': 0.0,
+            'has_recent_install': False,
+            'install_broadcast_detected': False,
+            'click_injection_risk_score': 0.0
+        }
+
+
+def get_conversion_data(device_id: str, ip_address: str) -> Dict[str, Any]:
+    """
+    Get conversion data for incentivized click detection
+    
+    Args:
+        device_id: Device ID
+        ip_address: IP address
+        
+    Returns:
+        Dictionary with conversion metrics
+    """
+    if not TABLE_NAME:
+        return {
+            'clicks_count': 0,
+            'conversions_count': 0,
+            'conversion_rate': 0.0
+        }
+    
+    try:
+        # Import storage utilities
+        try:
+            from storage.dynamodb_utils import query_events_by_device
+        except ImportError:
+            return {
+                'clicks_count': 0,
+                'conversions_count': 0,
+                'conversion_rate': 0.0
+            }
+        
+        # Get device events in last 24 hours
+        now = datetime.now(timezone.utc)
+        one_day_ago = int((now - timedelta(days=1)).timestamp())
+        now_timestamp = int(now.timestamp())
+        
+        device_events = query_events_by_device(TABLE_NAME, device_id, one_day_ago, now_timestamp)
+        
+        # Count clicks and conversions
+        clicks_count = sum(1 for e in device_events if e.get('event_type') == 'click')
+        conversions_count = sum(1 for e in device_events if e.get('event_type') in ['install', 'conversion'])
+        
+        # Calculate conversion rate
+        conversion_rate = float(conversions_count) / float(clicks_count) if clicks_count > 0 else 0.0
+        
+        return {
+            'clicks_count': clicks_count,
+            'conversions_count': conversions_count,
+            'conversion_rate': conversion_rate
+        }
+        
+    except Exception as e:
+        print(f"Error getting conversion data: {str(e)}")
+        return {
+            'clicks_count': 0,
+            'conversions_count': 0,
+            'conversion_rate': 0.0
+        }
+
+
+def get_competitor_data(ip_address: str) -> Dict[str, Any]:
+    """
+    Get competitor detection data
+    
+    Args:
+        ip_address: IP address
+        
+    Returns:
+        Dictionary with competitor detection data
+    """
+    # In production, load competitor IPs from configuration or database
+    # For now, use environment variable or default empty list
+    competitor_ips = os.environ.get('COMPETITOR_IPS', '').split(',') if os.environ.get('COMPETITOR_IPS') else []
+    
+    # Filter out empty strings
+    competitor_ips = [ip.strip() for ip in competitor_ips if ip.strip()]
+    
+    try:
+        from feature_extractor import is_competitor_ip, is_business_ip
+        
+        ip_is_competitor = is_competitor_ip(ip_address, competitor_ips)
+        ip_is_business = is_business_ip(ip_address)
+        
+        return {
+            'competitor_ips': competitor_ips,
+            'ip_is_competitor': ip_is_competitor,
+            'ip_is_business': ip_is_business
+        }
+        
+    except Exception as e:
+        print(f"Error getting competitor data: {str(e)}")
+        return {
+            'competitor_ips': [],
+            'ip_is_competitor': False,
+            'ip_is_business': False
+        }
+
+
+def calculate_click_injection_risk(click_to_install_time: float) -> float:
+    """
+    Calculate click injection risk score based on timing
+    
+    Args:
+        click_to_install_time: Time between click and install in seconds
+        
+    Returns:
+        Risk score (0.0-1.0)
+    """
+    if click_to_install_time <= 0:
+        return 0.0
+    
+    # <1 second is highly suspicious (likely click injection)
+    if click_to_install_time < 1.0:
+        return 0.95
+    
+    # 1-10 seconds is suspicious
+    if click_to_install_time < 10.0:
+        return 0.7
+    
+    # 10-30 seconds is somewhat suspicious
+    if click_to_install_time < 30.0:
+        return 0.4
+    
+    # 30-300 seconds is normal range
+    # Risk decreases as time increases
+    return max(0.0, 1.0 - (click_to_install_time / 300.0))
 
 
 def create_error_response(status_code: int, message: str) -> Dict[str, Any]:

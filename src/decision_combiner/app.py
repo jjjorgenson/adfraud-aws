@@ -5,7 +5,7 @@ Combines ML and AI analysis results for final fraud decisions using ensemble met
 import json
 import os
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Configuration
 FRAUD_THRESHOLD = float(os.environ.get('FRAUD_THRESHOLD', '0.65'))

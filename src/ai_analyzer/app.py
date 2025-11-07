@@ -4,9 +4,10 @@ Deep fraud analysis using Amazon Bedrock Claude
 """
 import json
 import os
-import boto3
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
+
+import boto3
 
 # Initialize AWS clients
 bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')

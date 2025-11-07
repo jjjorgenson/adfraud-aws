@@ -4,10 +4,11 @@ Parses and enriches ad events, stores in DynamoDB and S3
 """
 import json
 import os
-import boto3
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 from uuid import uuid4
-from typing import Dict, Any, Optional
+
+import boto3
 
 # Initialize AWS clients
 dynamodb = boto3.resource('dynamodb')
