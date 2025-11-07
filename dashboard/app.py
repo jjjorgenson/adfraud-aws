@@ -227,15 +227,21 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     df = pd.DataFrame(events)
     
+    # Convert is_fraud to numeric (0/1) for proper aggregation
+    if 'is_fraud' in df.columns:
+        # Convert boolean/object to numeric: True -> 1, False -> 0, None -> 0
+        df['is_fraud'] = df['is_fraud'].apply(lambda x: 1 if x is True or x == True or str(x).lower() == 'true' else 0)
+        df['is_fraud'] = pd.to_numeric(df['is_fraud'], errors='coerce').fillna(0)
+    
     # Basic metrics
     total_events = len(df)
-    fraud_count = df['is_fraud'].sum() if 'is_fraud' in df.columns else 0
+    fraud_count = int(df['is_fraud'].sum()) if 'is_fraud' in df.columns else 0
     fraud_rate = (fraud_count / total_events * 100) if total_events > 0 else 0.0
     
     # Fraud by type
     fraud_by_type = {}
     if 'primary_fraud_type' in df.columns:
-        fraud_df = df[df['is_fraud'] == True] if 'is_fraud' in df.columns else df
+        fraud_df = df[df['is_fraud'] == 1] if 'is_fraud' in df.columns else df
         fraud_by_type = fraud_df['primary_fraud_type'].value_counts().to_dict()
     
     # Top fraud signals
@@ -255,6 +261,9 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             'is_fraud': ['sum', 'count']
         }).reset_index()
         campaign_fraud.columns = ['campaign_id', 'fraud_count', 'total_count']
+        # Ensure columns are numeric
+        campaign_fraud['fraud_count'] = pd.to_numeric(campaign_fraud['fraud_count'], errors='coerce').fillna(0)
+        campaign_fraud['total_count'] = pd.to_numeric(campaign_fraud['total_count'], errors='coerce').fillna(1)
         campaign_fraud['fraud_rate'] = (campaign_fraud['fraud_count'] / campaign_fraud['total_count'] * 100).round(2)
         fraud_by_campaign = campaign_fraud.set_index('campaign_id')['fraud_rate'].to_dict()
     
@@ -265,6 +274,9 @@ def calculate_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             'is_fraud': ['sum', 'count']
         }).reset_index()
         country_fraud.columns = ['country', 'fraud_count', 'total_count']
+        # Ensure columns are numeric
+        country_fraud['fraud_count'] = pd.to_numeric(country_fraud['fraud_count'], errors='coerce').fillna(0)
+        country_fraud['total_count'] = pd.to_numeric(country_fraud['total_count'], errors='coerce').fillna(1)
         country_fraud['fraud_rate'] = (country_fraud['fraud_count'] / country_fraud['total_count'] * 100).round(2)
         fraud_by_country = country_fraud.set_index('country')['fraud_rate'].to_dict()
     
