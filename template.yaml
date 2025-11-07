@@ -209,6 +209,60 @@ Resources:
           AI_WEIGHT: '0.6'
           ENSEMBLE_METHOD: 'confidence_weighted'
 
+  # Honeypot Lambda Function
+  HoneypotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-honeypot'
+      CodeUri: src/honeypot/
+      Handler: app.lambda_handler
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          INGESTION_FUNCTION: !Ref IngestionHandler
+          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTableName
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !GetAtt IngestionHandler.Arn
+      Events:
+        RootPath:
+          Type: Api
+          Properties:
+            Path: /
+            Method: GET
+            RestApiId: !Ref HoneypotApi
+        TrackPath:
+          Type: Api
+          Properties:
+            Path: /api/track
+            Method: POST
+            RestApiId: !Ref HoneypotApi
+        ProxyPath:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            RestApiId: !Ref HoneypotApi
+
+  # API Gateway for Honeypot
+  HoneypotApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-honeypot-api'
+      StageName: prod
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+
   # SageMaker Endpoint (placeholder - will be created after model training)
   # Commented out for now - requires actual model to be trained and deployed
   # SageMakerEndpoint:
@@ -663,68 +717,6 @@ Outputs:
     Value: !Ref DashboardCluster
     Export:
       Name: !Sub '${AWS::StackName}-DashboardClusterName'
-
-  # Honeypot Lambda Function
-  HoneypotFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub '${AWS::StackName}-honeypot'
-      CodeUri: src/honeypot/
-      Handler: app.lambda_handler
-      Runtime: python3.11
-      Timeout: 30
-      MemorySize: 512
-      Environment:
-        Variables:
-          INGESTION_FUNCTION: !Ref IngestionHandler
-          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref DynamoDBTableName
-        - LambdaInvokeFunction:
-            FunctionName: !Ref IngestionHandler
-      Events:
-        ApiEvent:
-          Type: Api
-          Properties:
-            Path: /{proxy+}
-            Method: ANY
-            RestApiId: !Ref HoneypotApi
-
-  # API Gateway for Honeypot
-  HoneypotApi:
-    Type: AWS::Serverless::Api
-    Properties:
-      Name: !Sub '${AWS::StackName}-honeypot-api'
-      StageName: prod
-      Cors:
-        AllowMethods: "'*'"
-        AllowHeaders: "'*'"
-        AllowOrigin: "'*'"
-      DefinitionBody:
-        swagger: '2.0'
-        info:
-          title: Honeypot API
-          version: '1.0'
-        paths:
-          /:
-            get:
-              x-amazon-apigateway-integration:
-                type: aws_proxy
-                httpMethod: POST
-                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HoneypotFunction.Arn}/invocations'
-          /api/track:
-            post:
-              x-amazon-apigateway-integration:
-                type: aws_proxy
-                httpMethod: POST
-                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HoneypotFunction.Arn}/invocations'
-          /{proxy+}:
-            x-amazon-apigateway-any-method:
-              x-amazon-apigateway-integration:
-                type: aws_proxy
-                httpMethod: POST
-                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HoneypotFunction.Arn}/invocations'
 
   HoneypotApiURL:
     Description: Honeypot API Gateway URL
