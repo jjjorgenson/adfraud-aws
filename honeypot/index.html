@@ -228,8 +228,8 @@
         
         // Send event to backend
         function sendEvent(event) {
-            // Try to send to API endpoint if available
-            const apiUrl = '/api/track' || 'https://api.example.com/track';
+            // Try to send to API endpoint
+            const apiUrl = '/api/track';
             
             fetch(apiUrl, {
                 method: 'POST',
@@ -237,9 +237,15 @@
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify(event)
-            }).catch(err => {
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Honeypot event tracked:', data);
+            })
+            .catch(err => {
                 // Fallback: log to console
-                console.log('Honeypot event tracked:', event);
+                console.log('Honeypot event tracked (fallback):', event);
+                console.error('Error sending event:', err);
             });
             
             // Also log locally
