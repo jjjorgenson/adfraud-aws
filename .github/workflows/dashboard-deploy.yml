@@ -80,6 +80,10 @@ jobs:
         run: |
           IMAGE_TAG="${{ github.sha }}"
           ENV="${{ steps.env.outputs.environment }}"
+          # Ensure ENV has a default value if empty
+          if [ -z "${ENV}" ]; then
+            ENV="dev"
+          fi
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-${IMAGE_TAG}"
           
           echo "Building Docker image for ${ENV} environment..."
@@ -97,6 +101,10 @@ jobs:
         run: |
           IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
           ENV="${{ steps.env.outputs.environment }}"
+          # Ensure ENV has a default value if empty
+          if [ -z "${ENV}" ]; then
+            ENV="dev"
+          fi
           echo "Pushing image to ECR..."
           echo "IMAGE_URI=${IMAGE_URI}"
           docker push "${IMAGE_URI}"

@@ -105,11 +105,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Run Bandit security scan
-        uses: securecodewarrior/github-action-bandit@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: src/
-          exit_zero: true
+          python-version: '3.11'
+      
+      - name: Run Bandit security scan
+        run: |
+          pip install bandit
+          bandit -r src/ -f json -o bandit-report.json || true
+          if [ -f bandit-report.json ]; then
+            echo "Bandit scan completed. Report saved to bandit-report.json"
+          fi
       
       - name: Run Safety check
         run: |
