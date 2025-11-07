@@ -136,19 +136,20 @@ def get_mock_events(hours: int = 24) -> List[Dict[str, Any]]:
     for i in range(100):
         is_fraud = random.random() < 0.3  # 30% fraud rate
         campaign_id = f'campaign-{random.randint(1, 10)}'
+        primary_fraud_type = random.choice(fraud_types) if is_fraud else 'legitimate'
+        
         # Generate realistic IP addresses based on fraud type
         if is_fraud:
-            fraud_type = random.choice(fraud_types)
-            if fraud_type == 'bot_traffic':
+            if primary_fraud_type == 'bot_traffic':
                 # Datacenter IPs for bot traffic
                 ip_address = f'10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}'
-            elif fraud_type == 'click_farm':
+            elif primary_fraud_type == 'click_farm':
                 # Click farm IPs (private range)
                 ip_address = f'172.16.{random.randint(0, 31)}.{random.randint(1, 254)}'
-            elif fraud_type == 'competitor_clicking':
+            elif primary_fraud_type == 'competitor_clicking':
                 # Business IPs for competitor clicking
                 ip_address = f'203.0.113.{random.randint(1, 254)}'
-            elif fraud_type == 'proxy_fraud':
+            elif primary_fraud_type == 'proxy_fraud':
                 # Proxy IPs
                 ip_address = f'198.51.100.{random.randint(1, 254)}'
             else:
@@ -157,8 +158,6 @@ def get_mock_events(hours: int = 24) -> List[Dict[str, Any]]:
         else:
             # Legitimate traffic - use realistic public IPs
             ip_address = fake.ipv4() if fake else f'{random.randint(1, 223)}.{random.randint(1, 255)}.{random.randint(1, 255)}.{random.randint(1, 254)}'
-        
-        primary_fraud_type = random.choice(fraud_types) if is_fraud else 'legitimate'
         
         # Generate fraud-specific data
         click_to_install_time = None
