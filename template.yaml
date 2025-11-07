@@ -9,13 +9,14 @@ Globals:
     Runtime: python3.11
     Environment:
       Variables:
-        DYNAMODB_TABLE_NAME: !Ref EventsTable
+        DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
         S3_BUCKET_NAME: !Ref DataBucket
 
 Resources:
   # DynamoDB Table
   EventsTable:
     Type: AWS::DynamoDB::Table
+    Condition: CreateTable
     Properties:
       TableName: !Sub 'fraudguard-events-${Environment}'
       BillingMode: PAY_PER_REQUEST
@@ -110,7 +111,7 @@ Resources:
           - Id: DeleteOldVersions
             Status: Enabled
             NoncurrentVersionTransitions:
-              - NoncurrentDays: 30
+              - TransitionInDays: 30
                 StorageClass: GLACIER_IR
             NoncurrentVersionExpirationInDays: 90
       PublicAccessBlockConfiguration:
@@ -118,9 +119,9 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      ServerSideEncryptionConfiguration:
-        Rules:
-          - ApplyServerSideEncryptionByDefault:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       Tags:
         - Key: Environment
@@ -140,7 +141,7 @@ Resources:
             Principal: '*'
             Action: 's3:*'
             Resource:
-              - !Sub '${DataBucket}/*'
+              - !Sub '${DataBucket.Arn}/*'
               - !GetAtt DataBucket.Arn
             Condition:
               Bool:
@@ -156,7 +157,7 @@ Resources:
       Description: Parse and enrich ad events, store in DynamoDB and S3
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref EventsTable
+            TableName: !Ref DynamoDBTableName
         - S3WritePolicy:
             BucketName: !Ref DataBucket
         - Version: '2012-10-17'
@@ -166,8 +167,8 @@ Resources:
                 - dynamodb:Query
                 - dynamodb:GetItem
               Resource:
-                - !GetAtt EventsTable.Arn
-                - !Sub '${EventsTable.Arn}/index/*'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}/index/*'
 
   # Lambda: Fraud Orchestrator
   FraudOrchestrator:
@@ -181,13 +182,13 @@ Resources:
       MemorySize: 1024
       Environment:
         Variables:
-          SAGEMAKER_ENDPOINT: !Ref SageMakerEndpoint
+          SAGEMAKER_ENDPOINT: 'fraudguard-xgboost-endpoint'  # Placeholder until model is deployed
           AI_ANALYZER_FUNCTION: !GetAtt AIAnalyzer.Arn
           DECISION_COMBINER_FUNCTION: !GetAtt DecisionCombiner.Arn
-          DYNAMODB_TABLE_NAME: !Ref EventsTable
+          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
       Policies:
         - DynamoDBCrudPolicy:
-            TableName: !Ref EventsTable
+            TableName: !Ref DynamoDBTableName
         - S3WritePolicy:
             BucketName: !Ref DataBucket
         - Version: '2012-10-17'
@@ -238,6 +239,7 @@ Resources:
           AI_WEIGHT: '0.6'
           ENSEMBLE_METHOD: 'confidence_weighted'
 
+<<<<<<< HEAD
   # Lambda: Google Ads Tracking Handler
   GoogleAdsTrackingHandler:
     Type: AWS::Serverless::Function
@@ -265,48 +267,104 @@ Resources:
                 - lambda:InvokeFunction
               Resource: !GetAtt FraudOrchestrator.Arn
 
+  # Honeypot Lambda Function
+  HoneypotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-honeypot'
+      CodeUri: src/honeypot/
+      Handler: app.lambda_handler
+      Runtime: python3.11
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          INGESTION_FUNCTION: !Ref IngestionHandler
+          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTableName
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !GetAtt IngestionHandler.Arn
+      Events:
+        RootPath:
+          Type: Api
+          Properties:
+            Path: /
+            Method: GET
+            RestApiId: !Ref HoneypotApi
+        TrackPath:
+          Type: Api
+          Properties:
+            Path: /api/track
+            Method: POST
+            RestApiId: !Ref HoneypotApi
+        ProxyPath:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            RestApiId: !Ref HoneypotApi
+
+  # API Gateway for Honeypot
+  HoneypotApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-honeypot-api'
+      StageName: prod
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+
   # SageMaker Endpoint (placeholder - will be created after model training)
-  SageMakerEndpoint:
-    Type: AWS::SageMaker::Endpoint
-    Properties:
-      EndpointName: !Sub '${AWS::StackName}-xgboost-endpoint'
-      EndpointConfigName: !Ref SageMakerEndpointConfig
+  # Commented out for now - requires actual model to be trained and deployed
+  # SageMakerEndpoint:
+  #   Type: AWS::SageMaker::Endpoint
+  #   Properties:
+  #     EndpointName: !Sub '${AWS::StackName}-xgboost-endpoint'
+  #     EndpointConfigName: !Ref SageMakerEndpointConfig
 
-  SageMakerEndpointConfig:
-    Type: AWS::SageMaker::EndpointConfig
-    Properties:
-      EndpointConfigName: !Sub '${AWS::StackName}-xgboost-config'
-      ProductionVariants:
-        - VariantName: AllTraffic
-          ModelName: !Ref SageMakerModel
-          InitialInstanceCount: 1
-          InstanceType: ml.t2.medium
-          InitialVariantWeight: 1.0
+  # SageMakerEndpointConfig:
+  #   Type: AWS::SageMaker::EndpointConfig
+  #   Properties:
+  #     EndpointConfigName: !Sub '${AWS::StackName}-xgboost-config'
+  #     ProductionVariants:
+  #       - VariantName: AllTraffic
+  #         ModelName: !Ref SageMakerModel
+  #         InitialInstanceCount: 1
+  #         InstanceType: ml.t2.medium
+  #         InitialVariantWeight: 1.0
 
-  SageMakerModel:
-    Type: AWS::SageMaker::Model
-    Properties:
-      ModelName: !Sub '${AWS::StackName}-xgboost-model'
-      PrimaryContainer:
-        Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/xgboost:latest'
-        ModelDataUrl: s3://placeholder/model.tar.gz
-      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+  # SageMakerModel:
+  #   Type: AWS::SageMaker::Model
+  #   Properties:
+  #     ModelName: !Sub '${AWS::StackName}-xgboost-model'
+  #     PrimaryContainer:
+  #       Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/xgboost:latest'
+  #       ModelDataUrl: s3://placeholder/model.tar.gz
+  #     ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
 
-  SageMakerExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: sagemaker.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+  # SageMakerExecutionRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service: sagemaker.amazonaws.com
+  #           Action: sts:AssumeRole
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
 
   # ECS Dashboard Resources
-  # VPC (using default VPC for simplicity - can be parameterized later)
+  # Using existing default VPC to avoid VPC limit issues
+  # Parameters for VPC and subnets (will use default VPC if not provided)
   DashboardVPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -316,9 +374,11 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-dashboard-vpc'
+    Condition: CreateNewVPC
 
   DashboardPublicSubnet1:
     Type: AWS::EC2::Subnet
+    Condition: CreateNewVPC
     Properties:
       VpcId: !Ref DashboardVPC
       AvailabilityZone: !Select [0, !GetAZs '']
@@ -330,6 +390,7 @@ Resources:
 
   DashboardPublicSubnet2:
     Type: AWS::EC2::Subnet
+    Condition: CreateNewVPC
     Properties:
       VpcId: !Ref DashboardVPC
       AvailabilityZone: !Select [1, !GetAZs '']
@@ -341,6 +402,7 @@ Resources:
 
   DashboardInternetGateway:
     Type: AWS::EC2::InternetGateway
+    Condition: CreateNewVPC
     Properties:
       Tags:
         - Key: Name
@@ -348,12 +410,14 @@ Resources:
 
   DashboardInternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateNewVPC
     Properties:
       InternetGatewayId: !Ref DashboardInternetGateway
       VpcId: !Ref DashboardVPC
 
   DashboardPublicRouteTable:
     Type: AWS::EC2::RouteTable
+    Condition: CreateNewVPC
     Properties:
       VpcId: !Ref DashboardVPC
       Tags:
@@ -362,6 +426,7 @@ Resources:
 
   DashboardDefaultPublicRoute:
     Type: AWS::EC2::Route
+    Condition: CreateNewVPC
     DependsOn: DashboardInternetGatewayAttachment
     Properties:
       RouteTableId: !Ref DashboardPublicRouteTable
@@ -370,12 +435,14 @@ Resources:
 
   DashboardPublicSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNewVPC
     Properties:
       RouteTableId: !Ref DashboardPublicRouteTable
       SubnetId: !Ref DashboardPublicSubnet1
 
   DashboardPublicSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNewVPC
     Properties:
       RouteTableId: !Ref DashboardPublicRouteTable
       SubnetId: !Ref DashboardPublicSubnet2
@@ -386,7 +453,7 @@ Resources:
     Properties:
       GroupName: !Sub '${AWS::StackName}-dashboard-alb-sg'
       GroupDescription: Security group for Dashboard Application Load Balancer
-      VpcId: !Ref DashboardVPC
+      VpcId: !If [CreateNewVPC, !Ref DashboardVPC, !Ref VpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -412,7 +479,7 @@ Resources:
     Properties:
       GroupName: !Sub '${AWS::StackName}-dashboard-ecs-sg'
       GroupDescription: Security group for Dashboard ECS tasks
-      VpcId: !Ref DashboardVPC
+      VpcId: !If [CreateNewVPC, !Ref DashboardVPC, !Ref VpcId]
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 8501
@@ -435,9 +502,11 @@ Resources:
       Type: application
       Scheme: internet-facing
       IpAddressType: ipv4
-      Subnets:
-        - !Ref DashboardPublicSubnet1
-        - !Ref DashboardPublicSubnet2
+      Subnets: !If
+        - CreateNewVPC
+        - - !Ref DashboardPublicSubnet1
+          - !Ref DashboardPublicSubnet2
+        - !Ref SubnetIds
       SecurityGroups:
         - !Ref DashboardALBSecurityGroup
       Tags:
@@ -451,7 +520,7 @@ Resources:
       Name: !Sub '${AWS::StackName}-dashboard-tg'
       Port: 8501
       Protocol: HTTP
-      VpcId: !Ref DashboardVPC
+      VpcId: !If [CreateNewVPC, !Ref DashboardVPC, !Ref VpcId]
       TargetType: ip
       HealthCheckProtocol: HTTP
       HealthCheckPath: /_stcore/health
@@ -542,8 +611,8 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:GetItem
                 Resource:
-                  - !GetAtt EventsTable.Arn
-                  - !Sub '${EventsTable.Arn}/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}/index/*'
         - PolicyName: S3Access
           PolicyDocument:
             Version: '2012-10-17'
@@ -551,7 +620,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                Resource: !Sub '${DataBucket}/*'
+                Resource: !Sub '${DataBucket.Arn}/*'
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-dashboard-task-role'
@@ -577,7 +646,7 @@ Resources:
               Protocol: tcp
           Environment:
             - Name: DYNAMODB_TABLE_NAME
-              Value: !Ref EventsTable
+              Value: !Ref DynamoDBTableName
             - Name: AWS_REGION
               Value: !Ref AWS::Region
             - Name: S3_BUCKET_NAME
@@ -652,9 +721,11 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets:
-            - !Ref DashboardPublicSubnet1
-            - !Ref DashboardPublicSubnet2
+          Subnets: !If
+            - CreateNewVPC
+            - - !Ref DashboardPublicSubnet1
+              - !Ref DashboardPublicSubnet2
+            - !Ref SubnetIds
           SecurityGroups:
             - !Ref DashboardECSSecurityGroup
       LoadBalancers:
@@ -1081,19 +1152,40 @@ Parameters:
     Type: String
     Default: ''
     Description: Email address for CloudWatch alarm notifications (optional)
+  
+  VpcId:
+    Type: String
+    Default: vpc-03cd6462b46350c8e
+    Description: VPC ID to use for ECS resources (default VPC)
+  
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: 'subnet-0ec51c4b01051563c,subnet-0dcbb744fa27d655a'
+    Description: Subnet IDs to use for ECS resources (default subnets)
+  
+  CreateDynamoDBTable:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Create DynamoDB table (set to false if table already exists)
+  
+  DynamoDBTableName:
+    Type: String
+    Default: fraudguard-events-dev
+    Description: DynamoDB table name (use existing table name if CreateDynamoDBTable is false)
+
+Conditions:
+  CreateNewVPC: !Equals [!Ref VpcId, '']
+  CreateTable: !Equals [!Ref CreateDynamoDBTable, 'true']
 
 Outputs:
   EventsTableName:
     Description: DynamoDB Events Table Name
-    Value: !Ref EventsTable
+    Value: !Ref DynamoDBTableName
     Export:
       Name: !Sub '${AWS::StackName}-EventsTable'
-
-  EventsTableArn:
-    Description: DynamoDB Events Table ARN
-    Value: !GetAtt EventsTable.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-EventsTableArn'
 
   DataBucketName:
     Description: S3 Data Bucket Name
@@ -1142,4 +1234,10 @@ Outputs:
     Value: !Ref PlatformOpsAlertsTopic
     Export:
       Name: !Sub '${AWS::StackName}-OpsAlertsTopicArn'
+
+  HoneypotApiURL:
+    Description: Honeypot API Gateway URL
+    Value: !Sub 'https://${HoneypotApi}.execute-api.${AWS::Region}.amazonaws.com/prod/'
+    Export:
+      Name: !Sub '${AWS::StackName}-HoneypotURL'
 
