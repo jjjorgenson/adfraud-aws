@@ -21,7 +21,7 @@ on:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: fraudguard-dashboard
-  APP_RUNNER_SERVICE: fraudguard-dashboard
+  STACK_NAME: fraudguard-ai
 
 jobs:
   build-and-deploy:
@@ -111,136 +111,156 @@ jobs:
           docker push "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${ENV}-latest"
           echo "✅ Image pushed successfully"
       
-      - name: Get App Runner service ARN
-        id: get-service
+      - name: Get ECS cluster and service info
+        id: get-ecs-info
         run: |
           ENV="${{ steps.env.outputs.environment }}"
-          SERVICE_ARN=$(aws apprunner list-services \
+          STACK_NAME="${{ env.STACK_NAME }}-${ENV}"
+          
+          # Get cluster name from stack
+          CLUSTER_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
             --region "${{ env.AWS_REGION }}" \
-            --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
+            --query "Stacks[0].Outputs[?OutputKey=='DashboardClusterName'].OutputValue" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "${CLUSTER_NAME}" ]; then
+            # Try to get from resources
+            CLUSTER_NAME=$(aws cloudformation describe-stack-resources \
+              --stack-name "${STACK_NAME}" \
+              --region "${{ env.AWS_REGION }}" \
+              --query "StackResources[?ResourceType=='AWS::ECS::Cluster'].PhysicalResourceId" \
+              --output text 2>/dev/null || echo "${STACK_NAME}-dashboard-cluster")
+          fi
+          
+          # Get service name
+          SERVICE_NAME=$(aws cloudformation describe-stack-resources \
+            --stack-name "${STACK_NAME}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "StackResources[?ResourceType=='AWS::ECS::Service'].PhysicalResourceId" \
+            --output text 2>/dev/null || echo "${STACK_NAME}-dashboard-service")
+          
+          # Get task definition family
+          TASK_FAMILY=$(aws cloudformation describe-stack-resources \
+            --stack-name "${STACK_NAME}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "StackResources[?ResourceType=='AWS::ECS::TaskDefinition'].PhysicalResourceId" \
+            --output text 2>/dev/null || echo "${STACK_NAME}-dashboard-task")
+          
+          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
+          echo "task_family=${TASK_FAMILY}" >> $GITHUB_OUTPUT
+          
+          echo "✅ Cluster: ${CLUSTER_NAME}"
+          echo "✅ Service: ${SERVICE_NAME}"
+          echo "✅ Task Family: ${TASK_FAMILY}"
+        continue-on-error: true
+      
+      - name: Register new ECS task definition
+        id: register-task
+        run: |
+          ENV="${{ steps.env.outputs.environment }}"
+          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
+          TABLE_NAME="${{ steps.env.outputs.table_name }}"
+          TASK_FAMILY="${{ steps.get-ecs-info.outputs.task_family }}"
+          STACK_NAME="${{ env.STACK_NAME }}-${ENV}"
+          
+          # Get current task definition
+          CURRENT_TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "${TASK_FAMILY}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'taskDefinition' \
+            --output json 2>/dev/null || echo "{}")
+          
+          if [ "$CURRENT_TASK_DEF" == "{}" ]; then
+            echo "⚠️  Task definition not found. Please deploy the CloudFormation stack first."
+            exit 1
+          fi
+          
+          # Get S3 bucket name
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DataBucketName'].OutputValue" \
+            --output text 2>/dev/null || echo '')
+          
+          # Create new task definition with updated image
+          NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEF" | jq \
+            --arg IMAGE_URI "${IMAGE_URI}" \
+            --arg TABLE_NAME "${TABLE_NAME}" \
+            --arg REGION "${{ env.AWS_REGION }}" \
+            --arg BUCKET "${BUCKET}" \
+            'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) |
+            .containerDefinitions[0].image = $IMAGE_URI |
+            .containerDefinitions[0].environment = [
+              {"name": "DYNAMODB_TABLE_NAME", "value": $TABLE_NAME},
+              {"name": "AWS_REGION", "value": $REGION},
+              {"name": "S3_BUCKET_NAME", "value": $BUCKET}
+            ]')
+          
+          # Register new task definition
+          TASK_DEF_ARN=$(echo "$NEW_TASK_DEF" | aws ecs register-task-definition \
+            --region "${{ env.AWS_REGION }}" \
+            --cli-input-json file:///dev/stdin \
+            --query 'taskDefinition.taskDefinitionArn' \
             --output text)
           
-          if [ -z "$SERVICE_ARN" ]; then
-            echo "Service not found. Creating new App Runner service..."
-            echo "create_new=true" >> $GITHUB_OUTPUT
-          else
-            echo "service_arn=${SERVICE_ARN}" >> $GITHUB_OUTPUT
-            echo "create_new=false" >> $GITHUB_OUTPUT
-          fi
+          echo "task_def_arn=${TASK_DEF_ARN}" >> $GITHUB_OUTPUT
+          echo "✅ Registered new task definition: ${TASK_DEF_ARN}"
         continue-on-error: true
       
-      - name: Create App Runner service (if needed)
-        if: steps.get-service.outputs.create_new == 'true'
+      - name: Update ECS service
         run: |
-          ENV="${{ steps.env.outputs.environment }}"
-          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
-          TABLE_NAME="${{ steps.env.outputs.table_name }}"
+          CLUSTER_NAME="${{ steps.get-ecs-info.outputs.cluster_name }}"
+          SERVICE_NAME="${{ steps.get-ecs-info.outputs.service_name }}"
+          TASK_DEF_ARN="${{ steps.register-task.outputs.task_def_arn }}"
           
-          echo "Creating new App Runner service: ${{ env.APP_RUNNER_SERVICE }}-${ENV}"
-          echo "IMAGE_URI=${IMAGE_URI}"
+          echo "Updating ECS service: ${SERVICE_NAME}"
+          echo "Cluster: ${CLUSTER_NAME}"
+          echo "New Task Definition: ${TASK_DEF_ARN}"
           
-          aws apprunner create-service \
-            --service-name "${{ env.APP_RUNNER_SERVICE }}-${ENV}" \
-            --source-configuration "{
-              \"ImageRepository\": {
-                \"ImageIdentifier\": \"${IMAGE_URI}\",
-                \"ImageRepositoryType\": \"ECR\",
-                \"ImageConfiguration\": {
-                  \"Port\": \"8501\",
-                  \"RuntimeEnvironmentVariables\": {
-                    \"DYNAMODB_TABLE_NAME\": \"${TABLE_NAME}\",
-                    \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
-                  }
-                }
-              }
-            }" \
-            --instance-configuration "{
-              \"Cpu\": \"1 vCPU\",
-              \"Memory\": \"2 GB\"
-            }" \
+          aws ecs update-service \
+            --cluster "${CLUSTER_NAME}" \
+            --service "${SERVICE_NAME}" \
+            --task-definition "${TASK_DEF_ARN}" \
             --region "${{ env.AWS_REGION }}" \
-            --output json || echo "Service creation may have failed or service already exists"
-        continue-on-error: true
-      
-      - name: Update App Runner service
-        if: steps.get-service.outputs.create_new == 'false'
-        run: |
-          ENV="${{ steps.env.outputs.environment }}"
-          IMAGE_URI="${{ steps.build-image.outputs.image_uri }}"
-          TABLE_NAME="${{ steps.env.outputs.table_name }}"
-          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
-          
-          echo "Updating App Runner service: ${SERVICE_ARN}"
-          echo "IMAGE_URI=${IMAGE_URI}"
-          
-          aws apprunner start-deployment \
-            --service-arn "${SERVICE_ARN}" \
-            --source-configuration "{
-              \"ImageRepository\": {
-                \"ImageIdentifier\": \"${IMAGE_URI}\",
-                \"ImageRepositoryType\": \"ECR\",
-                \"ImageConfiguration\": {
-                  \"Port\": \"8501\",
-                  \"RuntimeEnvironmentVariables\": {
-                    \"DYNAMODB_TABLE_NAME\": \"${TABLE_NAME}\",
-                    \"AWS_REGION\": \"${{ env.AWS_REGION }}\"
-                  }
-                }
-              }
-            }" \
-            --region "${{ env.AWS_REGION }}" \
+            --force-new-deployment \
             --output json
-          echo "✅ Deployment started"
+          
+          echo "✅ Service update initiated"
         continue-on-error: true
       
-      - name: Wait for deployment
+      - name: Wait for service to stabilize
         run: |
-          ENV="${{ steps.env.outputs.environment }}"
-          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
+          CLUSTER_NAME="${{ steps.get-ecs-info.outputs.cluster_name }}"
+          SERVICE_NAME="${{ steps.get-ecs-info.outputs.service_name }}"
           
-          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" == "None" ]; then
-            SERVICE_ARN=$(aws apprunner list-services \
-              --region "${{ env.AWS_REGION }}" \
-              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
-              --output text)
-          fi
-          
-          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
-            echo "Waiting for deployment to complete for service: ${SERVICE_ARN}"
-            aws apprunner wait service-in-service \
-              --service-arn "${SERVICE_ARN}" \
-              --region "${{ env.AWS_REGION }}" \
-              --max-attempts 30 \
-              --delay 10 || echo "⚠️  Deployment may still be in progress (this is normal)"
-          else
-            echo "⚠️  Could not find service ARN, skipping wait"
-          fi
+          echo "Waiting for service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${CLUSTER_NAME}" \
+            --services "${SERVICE_NAME}" \
+            --region "${{ env.AWS_REGION }}" \
+            || echo "⚠️  Service may still be stabilizing (this is normal)"
         continue-on-error: true
       
-      - name: Get service URL
+      - name: Get ALB URL
         id: get-url
         run: |
           ENV="${{ steps.env.outputs.environment }}"
-          SERVICE_ARN="${{ steps.get-service.outputs.service_arn }}"
+          STACK_NAME="${{ env.STACK_NAME }}-${ENV}"
           
-          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" == "None" ]; then
-            SERVICE_ARN=$(aws apprunner list-services \
-              --region "${{ env.AWS_REGION }}" \
-              --query "ServiceSummaryList[?ServiceName=='${{ env.APP_RUNNER_SERVICE }}-${ENV}'].ServiceArn" \
-              --output text)
-          fi
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='DashboardALBDNS'].OutputValue" \
+            --output text 2>/dev/null || echo "")
           
-          if [ -n "$SERVICE_ARN" ] && [ "$SERVICE_ARN" != "None" ]; then
-            SERVICE_URL=$(aws apprunner describe-service \
-              --service-arn "${SERVICE_ARN}" \
-              --region "${{ env.AWS_REGION }}" \
-              --query 'Service.ServiceUrl' \
-              --output text)
-            
+          if [ -n "${ALB_DNS}" ]; then
+            SERVICE_URL="http://${ALB_DNS}"
             echo "service_url=${SERVICE_URL}" >> $GITHUB_OUTPUT
             echo "✅ Dashboard deployed to: ${SERVICE_URL}"
           else
-            echo "⚠️  Could not retrieve service URL"
+            echo "⚠️  Could not retrieve ALB DNS name from stack outputs"
             echo "service_url=" >> $GITHUB_OUTPUT
           fi
         continue-on-error: true

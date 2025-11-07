@@ -248,6 +248,332 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
 
+  # ECS Dashboard Resources
+  # VPC (using default VPC for simplicity - can be parameterized later)
+  DashboardVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-vpc'
+
+  DashboardPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DashboardVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-subnet-1'
+
+  DashboardPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DashboardVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-subnet-2'
+
+  DashboardInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-igw'
+
+  DashboardInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref DashboardInternetGateway
+      VpcId: !Ref DashboardVPC
+
+  DashboardPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DashboardVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-public-rt'
+
+  DashboardDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: DashboardInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref DashboardPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref DashboardInternetGateway
+
+  DashboardPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DashboardPublicRouteTable
+      SubnetId: !Ref DashboardPublicSubnet1
+
+  DashboardPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DashboardPublicRouteTable
+      SubnetId: !Ref DashboardPublicSubnet2
+
+  # Security Group for ALB
+  DashboardALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-dashboard-alb-sg'
+      GroupDescription: Security group for Dashboard Application Load Balancer
+      VpcId: !Ref DashboardVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP access
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS access
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-alb-sg'
+
+  # Security Group for ECS Tasks
+  DashboardECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-dashboard-ecs-sg'
+      GroupDescription: Security group for Dashboard ECS tasks
+      VpcId: !Ref DashboardVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          SourceSecurityGroupId: !Ref DashboardALBSecurityGroup
+          Description: Allow traffic from ALB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-ecs-sg'
+
+  # Application Load Balancer
+  DashboardALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${AWS::StackName}-dashboard-alb'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref DashboardPublicSubnet1
+        - !Ref DashboardPublicSubnet2
+      SecurityGroups:
+        - !Ref DashboardALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-alb'
+
+  # Target Group for ECS Service
+  DashboardTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${AWS::StackName}-dashboard-tg'
+      Port: 8501
+      Protocol: HTTP
+      VpcId: !Ref DashboardVPC
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /_stcore/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-tg'
+
+  # ALB Listener
+  DashboardALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DashboardTargetGroup
+      LoadBalancerArn: !Ref DashboardALB
+      Port: 80
+      Protocol: HTTP
+
+  # ECS Cluster
+  DashboardCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-dashboard-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-cluster'
+
+  # ECS Task Execution Role
+  DashboardTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-task-execution-role'
+
+  # ECS Task Role
+  DashboardTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt EventsTable.Arn
+                  - !Sub '${EventsTable.Arn}/index/*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${DataBucket}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-task-role'
+
+  # ECS Task Definition
+  DashboardTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-dashboard-task'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '1024'
+      Memory: '2048'
+      ExecutionRoleArn: !GetAtt DashboardTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt DashboardTaskRole.Arn
+      ContainerDefinitions:
+        - Name: dashboard
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/fraudguard-dashboard:latest'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8501
+              Protocol: tcp
+          Environment:
+            - Name: DYNAMODB_TABLE_NAME
+              Value: !Ref EventsTable
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: S3_BUCKET_NAME
+              Value: !Ref DataBucket
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref DashboardLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: dashboard
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'curl -f http://localhost:8501/_stcore/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  # CloudWatch Log Group
+  DashboardLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}-dashboard'
+      RetentionInDays: 7
+
+  # ECS Service
+  DashboardService:
+    Type: AWS::ECS::Service
+    DependsOn: DashboardALBListener
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-dashboard-service'
+      Cluster: !Ref DashboardCluster
+      TaskDefinition: !Ref DashboardTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref DashboardPublicSubnet1
+            - !Ref DashboardPublicSubnet2
+          SecurityGroups:
+            - !Ref DashboardECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: dashboard
+          ContainerPort: 8501
+          TargetGroupArn: !Ref DashboardTargetGroup
+      HealthCheckGracePeriodSeconds: 60
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-dashboard-service'
+
 Parameters:
   Environment:
     Type: String
@@ -282,4 +608,22 @@ Outputs:
     Value: !GetAtt DataBucket.Arn
     Export:
       Name: !Sub '${AWS::StackName}-DataBucketArn'
+
+  DashboardALBDNS:
+    Description: Dashboard Application Load Balancer DNS Name
+    Value: !GetAtt DashboardALB.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardALBDNS'
+
+  DashboardALBURL:
+    Description: Dashboard URL
+    Value: !Sub 'http://${DashboardALB.DNSName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardURL'
+
+  DashboardClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref DashboardCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardClusterName'
 
