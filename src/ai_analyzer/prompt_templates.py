@@ -2,32 +2,30 @@
 Prompt Templates for Bedrock AI Analysis
 Contains optimized prompts for different fraud analysis scenarios
 """
+
 from typing import Any, Dict, List, Optional
 
 
 def build_base_prompt(
-    event_data: Dict[str, Any],
-    ml_score: float,
-    features: Dict[str, Any],
-    feature_vector: Optional[List[float]] = None
+    event_data: Dict[str, Any], ml_score: float, features: Dict[str, Any], feature_vector: Optional[List[float]] = None
 ) -> str:
     """
     Build base fraud analysis prompt
-    
+
     Args:
         event_data: Original event data
         ml_score: ML fraud score
         features: Extracted features dictionary
         feature_vector: Feature vector array
-        
+
     Returns:
         Formatted prompt string
     """
     # Extract behavioral context
-    ip_click_count_24h = features.get('ip_click_count_24h', event_data.get('ip_click_count_24h', 0))
-    device_click_count_1h = features.get('device_click_count_1h', event_data.get('device_click_count_1h', 0))
-    time_since_last_click = features.get('time_since_last_click', event_data.get('time_since_last_click', 'unknown'))
-    
+    ip_click_count_24h = features.get("ip_click_count_24h", event_data.get("ip_click_count_24h", 0))
+    device_click_count_1h = features.get("device_click_count_1h", event_data.get("device_click_count_1h", 0))
+    time_since_last_click = features.get("time_since_last_click", event_data.get("time_since_last_click", "unknown"))
+
     prompt = f"""You are an expert ad fraud detection analyst with 10+ years of experience. Analyze the following ad event and determine if it shows signs of fraudulent activity.
 
 EVENT DATA:
@@ -187,30 +185,27 @@ CRITICAL REQUIREMENTS:
 - confidence should reflect your overall confidence in the analysis (0.0-1.0)
 - fraud_signals should be specific, actionable signals (e.g., "bot_user_agent", "high_click_velocity", "datacenter_ip")
 - reasoning should cite specific evidence from the event data"""
-    
+
     return prompt
 
 
 def build_enhanced_prompt(
-    event_data: Dict[str, Any],
-    ml_score: float,
-    features: Dict[str, Any],
-    historical_context: Optional[Dict[str, Any]] = None
+    event_data: Dict[str, Any], ml_score: float, features: Dict[str, Any], historical_context: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Build enhanced prompt with historical context
-    
+
     Args:
         event_data: Original event data
         ml_score: ML fraud score
         features: Extracted features dictionary
         historical_context: Historical context data
-        
+
     Returns:
         Enhanced prompt string
     """
     base_prompt = build_base_prompt(event_data, ml_score, features)
-    
+
     if historical_context:
         historical_section = f"""
 
@@ -223,6 +218,5 @@ HISTORICAL CONTEXT:
 """
         # Insert historical section before OUTPUT FORMAT
         base_prompt = base_prompt.replace("OUTPUT FORMAT (JSON ONLY):", historical_section + "\nOUTPUT FORMAT (JSON ONLY):")
-    
-    return base_prompt
 
+    return base_prompt
