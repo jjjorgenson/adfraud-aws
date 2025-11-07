@@ -101,6 +101,24 @@ def get_recent_events(hours: int = 24) -> List[Dict[str, Any]]:
         return get_mock_events(hours)
 
 
+def generate_mock_reasoning(is_fraud: bool, campaign_id: str, ip_address: str, fraud_type: str = 'unknown') -> str:
+    """Generate detailed mock AI reasoning"""
+    if not is_fraud:
+        return f"This event shows legitimate traffic patterns from IP {ip_address} in campaign {campaign_id}. Normal user behavior detected with consistent click patterns, valid user agent, and expected geographic location. No suspicious activity identified."
+
+    fraud_types = {
+        'bot_traffic': f"This event exhibits clear bot traffic patterns. The IP address {ip_address} shows automated behavior with non-human click patterns. The user agent string indicates a bot framework, and the click velocity exceeds normal human interaction rates. Campaign {campaign_id} has been flagged for review due to high bot activity.",
+        'click_farm': f"Click farm activity detected from IP {ip_address} in campaign {campaign_id}. Multiple rapid clicks from the same source with identical patterns suggest coordinated fraudulent activity. The geographic location and timing patterns are consistent with known click farm operations. Immediate action recommended.",
+        'device_farm': f"Device farm indicators present. IP {ip_address} shows multiple device IDs with identical behavioral patterns, suggesting device spoofing. Campaign {campaign_id} is experiencing coordinated fraud attempts. The device fingerprinting reveals anomalies consistent with farm operations.",
+        'click_injection': f"Click injection fraud detected from IP {ip_address} in campaign {campaign_id}. A malicious app on the device monitored for new app installations and injected a fake click just before the install completed (<1 second timing). This pattern indicates install broadcast monitoring, where the fraudster steals attribution credit for legitimate app installs. The click-to-install time of less than 1 second is highly suspicious and characteristic of click injection attacks. Immediate blocking recommended.",
+        'incentivized_clicks': f"Incentivized click fraud detected from IP {ip_address} in campaign {campaign_id}. This event shows a pattern of high click volume with extremely low or zero conversion rate, indicating users are clicking ads for rewards rather than genuine interest. The engagement score is very low, suggesting users are not actually engaging with the content after clicking. This is characteristic of incentivized traffic where users are paid or rewarded to click ads. Immediate review recommended.",
+        'competitor_clicking': f"Competitor clicking fraud detected from IP {ip_address} in campaign {campaign_id}. The IP address matches known competitor ranges or business/office networks, and shows a pattern of high click volume with zero conversions. This suggests a competitor is clicking ads to drain the ad budget without generating any legitimate value. The timing patterns and geographic location further support this conclusion. Immediate blocking recommended.",
+        'proxy_fraud': f"Proxy/fake click fraud detected from IP {ip_address} in campaign {campaign_id}. The IP address is from a proxy server (beyond VPN), and shows low engagement scores with no conversions. This pattern indicates fake clicks generated through proxy servers to mask the real source. The combination of proxy IP, low engagement, and zero conversions is highly suspicious. Immediate blocking recommended."
+    }
+
+    return fraud_types.get(fraud_type, f"Fraudulent activity detected from IP {ip_address} in campaign {campaign_id}. Multiple suspicious indicators suggest this is not legitimate traffic.")
+
+
 def get_mock_events(hours: int = 24) -> List[Dict[str, Any]]:
     """Generate mock events for development"""
     import random
@@ -113,21 +131,82 @@ def get_mock_events(hours: int = 24) -> List[Dict[str, Any]]:
     events = []
     now = datetime.now(timezone.utc)
     
+    fraud_types = ['bot_traffic', 'click_farm', 'device_farm', 'click_injection', 'incentivized_clicks', 'competitor_clicking', 'proxy_fraud']
+    
     for i in range(100):
         is_fraud = random.random() < 0.3  # 30% fraud rate
-        events.append({
+        campaign_id = f'campaign-{random.randint(1, 10)}'
+        ip_address = fake.ipv4() if fake else f'192.168.{random.randint(1, 255)}.{random.randint(1, 255)}'
+        primary_fraud_type = random.choice(fraud_types) if is_fraud else 'legitimate'
+        
+        # Generate fraud-specific data
+        click_to_install_time = None
+        conversion_rate = None
+        engagement_score = None
+        ip_is_proxy = False
+        ip_is_business = False
+        ip_is_competitor = False
+        
+        if primary_fraud_type == 'click_injection':
+            # Click injection: <1 second is highly suspicious
+            click_to_install_time = random.uniform(0.1, 0.9)  # <1 second
+        elif primary_fraud_type == 'incentivized_clicks':
+            # Incentivized clicks: very low conversion rate, low engagement
+            conversion_rate = random.uniform(0.0, 0.001)  # <0.1% conversion rate
+            engagement_score = random.uniform(0.0, 0.3)  # Low engagement
+        elif primary_fraud_type == 'competitor_clicking':
+            # Competitor clicking: zero conversions, business IP
+            conversion_rate = 0.0  # Zero conversions
+            ip_is_business = True
+            ip_is_competitor = random.random() < 0.5  # 50% chance of known competitor IP
+        elif primary_fraud_type == 'proxy_fraud':
+            # Proxy fraud: proxy IP, low engagement, no conversions
+            ip_is_proxy = True
+            engagement_score = random.uniform(0.0, 0.3)  # Low engagement
+            conversion_rate = 0.0  # No conversions
+        elif is_fraud and random.random() < 0.2:  # 20% chance of having install data for other fraud types
+            click_to_install_time = random.uniform(30, 300)  # Normal range
+        
+        event = {
             'event_id': f'event-{i}',
             'timestamp': int((now - timedelta(minutes=random.randint(0, hours*60))).timestamp()),
             'is_fraud': is_fraud,
             'fraud_score': random.uniform(0.7, 0.95) if is_fraud else random.uniform(0.1, 0.4),
-            'campaign_id': f'campaign-{random.randint(1, 10)}',
+            'campaign_id': campaign_id,
             'publisher_id': f'publisher-{random.randint(1, 5)}',
-            'ip_address': fake.ipv4() if fake else f'192.168.{random.randint(1, 255)}.{random.randint(1, 255)}',
+            'ip_address': ip_address,
             'ip_country': fake.country_code() if fake else random.choice(['US', 'GB', 'CA', 'DE', 'FR']),
-            'primary_fraud_type': random.choice(['bot_traffic', 'click_farm', 'device_farm']) if is_fraud else 'legitimate',
-            'fraud_signals': random.sample(['bot_user_agent', 'high_click_velocity', 'datacenter_ip'], k=random.randint(1, 3)) if is_fraud else [],
-            'reasoning': 'Mock reasoning for fraud detection' if is_fraud else 'Legitimate traffic pattern'
-        })
+            'primary_fraud_type': primary_fraud_type,
+            'fraud_signals': random.sample(['bot_user_agent', 'high_click_velocity', 'datacenter_ip', 'suspicious_timing'], k=random.randint(1, 3)) if is_fraud else [],
+            'reasoning': generate_mock_reasoning(is_fraud, campaign_id, ip_address, primary_fraud_type)
+        }
+        
+        # Add fraud-specific fields
+        if click_to_install_time is not None:
+            event['click_to_install_time_sec'] = click_to_install_time
+            event['has_recent_install'] = True
+            event['install_broadcast_detected'] = click_to_install_time < 1.0
+            event['click_injection_risk_score'] = 0.95 if click_to_install_time < 1.0 else 0.3
+            event['is_mobile'] = True  # Click injection is mobile-only
+        
+        if conversion_rate is not None:
+            event['conversion_rate'] = conversion_rate
+            event['clicks_count'] = random.randint(10, 100) if primary_fraud_type == 'incentivized_clicks' else random.randint(1, 10)
+            event['conversions_count'] = int(event['clicks_count'] * conversion_rate)
+        
+        if engagement_score is not None:
+            event['engagement_score'] = engagement_score
+        
+        if ip_is_proxy:
+            event['ip_is_proxy'] = True
+        
+        if ip_is_business:
+            event['ip_is_business'] = True
+        
+        if ip_is_competitor:
+            event['ip_is_competitor'] = True
+        
+        events.append(event)
     
     return events
 
@@ -375,8 +454,15 @@ def render_event_detail(events: List[Dict[str, Any]]):
         st.subheader("Fraud Signals")
         signals = selected_event['fraud_signals']
         if isinstance(signals, list):
-            for signal in signals:
-                st.badge(signal, type="error")
+            # Display badges in a row
+            badge_cols = st.columns(min(len(signals), 5))  # Max 5 columns
+            for idx, signal in enumerate(signals):
+                with badge_cols[idx % len(badge_cols)]:
+                    st.markdown(
+                        f'<span style="background-color: #ff4444; color: white; padding: 4px 8px; '
+                        f'border-radius: 4px; font-size: 0.9em; font-weight: bold;">🚨 {signal}</span>',
+                        unsafe_allow_html=True
+                    )
         else:
             st.text(signals)
     

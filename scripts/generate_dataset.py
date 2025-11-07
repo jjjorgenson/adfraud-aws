@@ -26,7 +26,7 @@ VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 
 # Fraud types
-FRAUD_TYPES = ['bot_traffic', 'click_farm', 'device_farm', 'impersonation']
+FRAUD_TYPES = ['bot_traffic', 'click_farm', 'device_farm', 'impersonation', 'click_injection', 'incentivized_clicks', 'competitor_clicking', 'proxy_fraud']
 LEGITIMATE_TYPE = 'legitimate'
 
 # Bot user agents
@@ -137,6 +137,20 @@ def generate_legitimate_event(event_id: str, timestamp: datetime) -> Dict:
         'device_os': random.choice(OS_TYPES),
         'is_fraud': False,
         'fraud_type': LEGITIMATE_TYPE,
+        # Click injection features (normal values for legitimate events)
+        'click_to_install_time_sec': random.uniform(30, 300) if random.random() < 0.1 else 0.0,
+        'has_recent_install': False,
+        'install_broadcast_detected': False,
+        'click_injection_risk_score': 0.0,
+        # Conversion features (normal values for legitimate events)
+        'conversion_rate': random.uniform(0.01, 0.05) if random.random() < 0.2 else 0.0,
+        'clicks_count': random.randint(1, 5) if random.random() < 0.2 else 0,
+        'conversions_count': 0,
+        'engagement_score': random.uniform(0.6, 1.0) if random.random() < 0.5 else 0.0,
+        # Proxy/competitor features (normal values for legitimate events)
+        'ip_is_proxy': False,
+        'ip_is_business': False,
+        'ip_is_competitor': False,
     }
 
 
@@ -145,6 +159,13 @@ def generate_fraud_event(event_id: str, timestamp: datetime, fraud_type: str) ->
     device_id = fake.uuid4()
     campaign_id = f"campaign-{random.randint(1, 100)}"
     publisher_id = f"publisher-{random.randint(1, 50)}"
+    
+    # Initialize variables for all fraud types
+    ip_is_proxy = False
+    ip_is_business = False
+    ip_is_competitor = False
+    conversion_rate = None
+    engagement_score = None
     
     if fraud_type == 'bot_traffic':
         # Bot patterns
@@ -194,6 +215,83 @@ def generate_fraud_event(event_id: str, timestamp: datetime, fraud_type: str) ->
         device_fingerprint_entropy = random.uniform(0.1, 0.4)  # Similar devices
         is_repeated_click = random.random() < 0.4
         
+    elif fraud_type == 'click_injection':
+        # Click injection patterns (mobile-only)
+        ip_click_count_24h = random.randint(5, 50)  # Moderate click volume
+        device_click_count_1h = random.randint(1, 10)  # Low to moderate hourly clicks
+        time_since_last_click = random.uniform(30, 300)  # Normal inter-click timing
+        user_agent = generate_user_agent(is_bot=False, is_mobile=True)  # Always mobile
+        ua_entropy = calculate_entropy(user_agent)
+        ip_is_datacenter = random.random() < 0.3
+        ip_is_vpn = random.random() < 0.2
+        geo_distance_km = random.uniform(0, 100)  # Small distance (local)
+        click_to_view_time_ms = random.randint(100, 1000)  # Normal viewing time
+        campaign_fraud_rate = random.uniform(0.3, 0.7)
+        publisher_quality = random.uniform(0.3, 0.6)
+        device_fingerprint_entropy = random.uniform(0.4, 0.7)
+        is_repeated_click = random.random() < 0.2
+        # Click injection specific: very short click-to-install time (<1 second)
+        click_to_install_time_sec = random.uniform(0.1, 0.9)  # Highly suspicious timing
+        
+    elif fraud_type == 'incentivized_clicks':
+        # Incentivized click patterns
+        ip_click_count_24h = random.randint(20, 200)  # High click volume
+        device_click_count_1h = random.randint(5, 30)  # Moderate hourly clicks
+        time_since_last_click = random.uniform(5, 60)  # Fast clicks
+        user_agent = generate_user_agent(is_bot=False, is_mobile=random.choice([True, False]))
+        ua_entropy = calculate_entropy(user_agent)
+        ip_is_datacenter = random.random() < 0.4
+        ip_is_vpn = random.random() < 0.3
+        geo_distance_km = random.uniform(0, 1000)
+        click_to_view_time_ms = random.randint(50, 500)  # Low engagement (fast clicks)
+        campaign_fraud_rate = random.uniform(0.3, 0.7)
+        publisher_quality = random.uniform(0.2, 0.5)  # Low quality publishers
+        device_fingerprint_entropy = random.uniform(0.3, 0.6)
+        is_repeated_click = random.random() < 0.3
+        # Incentivized clicks: very low conversion rate, low engagement
+        conversion_rate = random.uniform(0.0, 0.001)  # <0.1% conversion rate
+        engagement_score = random.uniform(0.0, 0.3)  # Low engagement
+        
+    elif fraud_type == 'competitor_clicking':
+        # Competitor clicking patterns
+        ip_click_count_24h = random.randint(10, 100)  # Moderate click volume
+        device_click_count_1h = random.randint(3, 15)  # Moderate hourly clicks
+        time_since_last_click = random.uniform(10, 120)  # Business hours timing
+        user_agent = generate_user_agent(is_bot=False, is_mobile=False)  # Desktop typically
+        ua_entropy = calculate_entropy(user_agent)
+        ip_is_datacenter = random.random() < 0.3
+        ip_is_vpn = random.random() < 0.2
+        geo_distance_km = random.uniform(0, 500)  # Local/office location
+        click_to_view_time_ms = random.randint(100, 1000)  # Low engagement
+        campaign_fraud_rate = random.uniform(0.4, 0.8)
+        publisher_quality = random.uniform(0.3, 0.6)
+        device_fingerprint_entropy = random.uniform(0.4, 0.7)
+        is_repeated_click = random.random() < 0.2
+        # Competitor clicking: zero conversions, business IP
+        conversion_rate = 0.0  # Zero conversions
+        ip_is_business = True
+        ip_is_competitor = random.random() < 0.7  # 70% chance of known competitor IP
+        
+    elif fraud_type == 'proxy_fraud':
+        # Proxy/fake click patterns
+        ip_click_count_24h = random.randint(15, 150)  # Moderate to high click volume
+        device_click_count_1h = random.randint(3, 20)  # Moderate hourly clicks
+        time_since_last_click = random.uniform(5, 60)  # Fast clicks
+        user_agent = generate_user_agent(is_bot=False, is_mobile=random.choice([True, False]))
+        ua_entropy = calculate_entropy(user_agent)
+        ip_is_datacenter = random.random() < 0.5
+        ip_is_vpn = False  # Not VPN, but proxy
+        ip_is_proxy = True  # Proxy IP
+        geo_distance_km = random.uniform(100, 5000)  # Geographic anomalies
+        click_to_view_time_ms = random.randint(50, 500)  # Low engagement
+        campaign_fraud_rate = random.uniform(0.3, 0.7)
+        publisher_quality = random.uniform(0.2, 0.5)  # Low quality
+        device_fingerprint_entropy = random.uniform(0.2, 0.5)
+        is_repeated_click = random.random() < 0.3
+        # Proxy fraud: proxy IP, low engagement, no conversions
+        conversion_rate = 0.0  # No conversions
+        engagement_score = random.uniform(0.0, 0.3)  # Low engagement
+        
     else:  # impersonation
         # Impersonation patterns
         ip_click_count_24h = random.randint(10, 100)
@@ -209,11 +307,13 @@ def generate_fraud_event(event_id: str, timestamp: datetime, fraud_type: str) ->
         publisher_quality = random.uniform(0.4, 0.7)
         device_fingerprint_entropy = random.uniform(0.3, 0.6)
         is_repeated_click = random.random() < 0.2
+        click_to_install_time_sec = None
     
-    return {
+    # Build base event dictionary
+    event = {
         'event_id': event_id,
         'timestamp': int(timestamp.timestamp()),
-        'event_type': random.choice(['click', 'impression', 'install', 'conversion']),
+        'event_type': 'click' if fraud_type == 'click_injection' else random.choice(['click', 'impression', 'install', 'conversion']),
         'ip_address': generate_ip_address(is_datacenter=ip_is_datacenter, is_vpn=ip_is_vpn),
         'user_agent': user_agent,
         'device_id': device_id,
@@ -230,20 +330,61 @@ def generate_fraud_event(event_id: str, timestamp: datetime, fraud_type: str) ->
         'ua_entropy': ua_entropy,
         'ip_is_datacenter': ip_is_datacenter,
         'ip_is_vpn': ip_is_vpn,
+        'ip_is_proxy': ip_is_proxy,
+        'ip_is_business': ip_is_business,
+        'ip_is_competitor': ip_is_competitor,
         'geo_distance_km': geo_distance_km,
         'referrer_is_valid': random.random() > 0.4,  # More invalid referrers
         'click_to_view_time_ms': click_to_view_time_ms,
         'campaign_fraud_rate': campaign_fraud_rate,
         'publisher_quality': publisher_quality,
         'device_fingerprint_entropy': device_fingerprint_entropy,
-        'is_mobile': random.random() > 0.3,
+        'is_mobile': True if fraud_type == 'click_injection' else (random.random() > 0.3),
         'is_repeated_click': is_repeated_click,
         'time_to_conversion_sec': random.uniform(10, 300) if random.random() > 0.5 else None,
         'ip_country': random.choice(COUNTRIES),
-        'device_os': random.choice(OS_TYPES),
+        'device_os': 'Android' if fraud_type == 'click_injection' else random.choice(OS_TYPES),
         'is_fraud': True,
         'fraud_type': fraud_type,
     }
+    
+    # Add fraud-specific features
+    if fraud_type == 'click_injection':
+        event['click_to_install_time_sec'] = click_to_install_time_sec
+        event['has_recent_install'] = True
+        event['install_broadcast_detected'] = True  # <1 second indicates install broadcast monitoring
+        event['click_injection_risk_score'] = 0.95  # Highly suspicious
+    else:
+        # For other fraud types, add click injection features with normal values
+        event['click_to_install_time_sec'] = random.uniform(30, 300) if random.random() < 0.2 else 0.0
+        event['has_recent_install'] = event['click_to_install_time_sec'] > 0
+        event['install_broadcast_detected'] = False
+        event['click_injection_risk_score'] = 0.0
+    
+    # Add incentivized click features
+    if fraud_type == 'incentivized_clicks':
+        event['conversion_rate'] = conversion_rate
+        event['clicks_count'] = random.randint(10, 100)
+        event['conversions_count'] = int(event['clicks_count'] * conversion_rate)
+        event['engagement_score'] = engagement_score
+    elif fraud_type == 'competitor_clicking':
+        event['conversion_rate'] = conversion_rate
+        event['clicks_count'] = random.randint(5, 50)
+        event['conversions_count'] = 0  # Zero conversions
+        event['engagement_score'] = random.uniform(0.2, 0.5)  # Low engagement
+    elif fraud_type == 'proxy_fraud':
+        event['conversion_rate'] = conversion_rate
+        event['clicks_count'] = random.randint(5, 50)
+        event['conversions_count'] = 0  # No conversions
+        event['engagement_score'] = engagement_score
+    else:
+        # For other fraud types, add conversion features with normal values
+        event['conversion_rate'] = random.uniform(0.01, 0.05) if random.random() < 0.3 else 0.0
+        event['clicks_count'] = random.randint(1, 10) if random.random() < 0.3 else 0
+        event['conversions_count'] = int(event['clicks_count'] * event['conversion_rate']) if event['clicks_count'] > 0 else 0
+        event['engagement_score'] = random.uniform(0.5, 1.0) if random.random() < 0.5 else 0.0
+    
+    return event
 
 
 def generate_dataset() -> pd.DataFrame:
