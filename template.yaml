@@ -149,12 +149,12 @@ Resources:
       Description: Route events to ML or ML+AI analysis path
       Timeout: 300
       MemorySize: 1024
-             Environment:
-               Variables:
-                 SAGEMAKER_ENDPOINT: !Ref SageMakerEndpoint
-                 AI_ANALYZER_FUNCTION: !GetAtt AIAnalyzer.Arn
-                 DECISION_COMBINER_FUNCTION: !GetAtt DecisionCombiner.Arn
-                 DYNAMODB_TABLE_NAME: !Ref EventsTable
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT: !Ref SageMakerEndpoint
+          AI_ANALYZER_FUNCTION: !GetAtt AIAnalyzer.Arn
+          DECISION_COMBINER_FUNCTION: !GetAtt DecisionCombiner.Arn
+          DYNAMODB_TABLE_NAME: !Ref EventsTable
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref EventsTable
