@@ -397,14 +397,68 @@ def store_result(event_id: str, result: Dict[str, Any]) -> None:
         return
 
     try:
+        # Import storage utilities
+        try:
+            import sys
+            import os
+            # Add parent directory to path for Lambda deployment
+            sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+            from storage.dynamodb_utils import update_event_result
+            # Use storage utility function (preferred)
+            update_event_result(TABLE_NAME, event_id, result)
+            return
+        except ImportError:
+            # Fallback: use direct DynamoDB update
+            pass
+        
+        # Fallback: use direct DynamoDB update
+        from decimal import Decimal
+        
+        def convert_floats_to_decimal(obj: Any) -> Any:
+            """Recursively convert floats to Decimal for DynamoDB compatibility"""
+            if isinstance(obj, float):
+                return Decimal(str(obj))
+            elif isinstance(obj, dict):
+                return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_floats_to_decimal(item) for item in obj]
+            else:
+                return obj
+        
         table = dynamodb.Table(TABLE_NAME)
+        update_expression = "SET fraud_result = :result, updated_at = :timestamp"
+        expression_values = {":result": result, ":timestamp": datetime.now(timezone.utc).isoformat()}
+        
+        # Add top-level fields for dashboard compatibility
+        if "is_fraud" in result:
+            update_expression += ", is_fraud = :is_fraud"
+            expression_values[":is_fraud"] = result["is_fraud"]
+        
+        if "fraud_score" in result:
+            update_expression += ", fraud_score = :fraud_score"
+            expression_values[":fraud_score"] = convert_floats_to_decimal({"value": result["fraud_score"]})["value"]
+        
+        if "primary_fraud_type" in result:
+            update_expression += ", primary_fraud_type = :primary_fraud_type"
+            expression_values[":primary_fraud_type"] = result["primary_fraud_type"]
+        
+        if "fraud_signals" in result:
+            update_expression += ", fraud_signals = :fraud_signals"
+            expression_values[":fraud_signals"] = result["fraud_signals"]
+        
+        # Convert floats to Decimal for DynamoDB
+        expression_values = convert_floats_to_decimal(expression_values)
+        
         table.update_item(
             Key={"event_id": event_id},
-            UpdateExpression="SET fraud_result = :result, updated_at = :timestamp",
-            ExpressionAttributeValues={":result": result, ":timestamp": datetime.now(timezone.utc).isoformat()},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_values,
         )
+        
     except Exception as e:
         print(f"Error storing result: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 def get_click_injection_data(event_id: str, device_id: str, ip_address: str) -> Dict[str, Any]:
