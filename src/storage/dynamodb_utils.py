@@ -7,8 +7,11 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import boto3
+import os
 
-dynamodb = boto3.resource("dynamodb")
+# Get region from environment or default to us-east-1
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
 
 def get_table(table_name: str):
@@ -198,7 +201,6 @@ def get_time_since_last_click(table_name: str, device_id: str) -> Optional[int]:
     return now_timestamp - last_click_timestamp
 
 
-<<<<<<< HEAD
 def query_events_by_gclid(
     table_name: str,
     gclid: str,
